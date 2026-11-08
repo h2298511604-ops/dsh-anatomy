@@ -5,9 +5,33 @@
 
 ## 一句话介绍
 
-`dsh-anatomy` 是一个本地 DSH bundle（Host + Client 双半）：在左侧栏加一个「架构透视」图标，
+`dsh-anatomy` 是一个 DSH 插件（Host + Client 两部分）：在左侧栏加一个「架构透视」图标，
 点击后在主区域打开整页 **DSH 架构透视 · 实时架构** —— 从左到右 5 层、14 个组件域的实时架构图，
 以及底部的运行指标 / 组件架构 / 调用日志 / 时间线四个视图。
+
+## 截图
+
+组件域视图（5 层、14 个组件域的实时架构图）：
+
+![架构透视：5 层、14 个组件域的实时架构图](https://raw.githubusercontent.com/h2298511604-ops/dsh-anatomy/main/assets/screenshot-architecture.webp)
+
+工具调用视图（Top 8 工具调用连线与受影响的组件域）：
+
+![工具调用视图：Top 8 工具调用连线与受影响的组件域](https://raw.githubusercontent.com/h2298511604-ops/dsh-anatomy/main/assets/screenshot-tools.webp)
+
+## 安装
+
+- **dshmarket（社区插件市场）**：插件 → 发现 → 搜索 `dsh-anatomy` → 安装（被收录后）。
+- **GitHub 源码安装**：`dsh plugin add github:h2298511604-ops/dsh-anatomy`
+- **npm（发布后）**：`dsh plugin add dsh-anatomy`
+
+安装 / 更新后刷新页面一次（`Ctrl+R`）；左侧栏出现「架构透视」图标；若没有，确认插件已启用。
+仓库即插件包（Host 与 Client 都是原生模块），无需构建步骤；卸载后路由、监听器、定时器与打开的流连接会随
+`ctx.effect` 清理，不留后台定时器。
+
+**打开方式**：点击左侧栏「架构透视」图标（面板 id = `anatomy`）→ 主区域整页打开
+「DSH 架构透视 · 实时架构」；再点一次侧栏图标或切换到其他面板即可关闭。首帧快照到达前显示
+`connecting` 骨架，之后变为 `live`。
 
 ## 它显示什么
 
@@ -56,16 +80,6 @@
   （API 基址、传输方式、已收帧、轮询次数、连接状态、主题 light/dark、最后错误）、活跃组件域排行。
 - **调用日志**：实时表格（时间、类型、从 → 到、标签、耗时、状态），可过滤、可自动滚动，最多渲染最近 200 行。
 
-## 怎么打开
-
-1. 通过 DSH 的 Plugin Manager 安装这个本地 bundle，并确认 `dsh-anatomy` 处于启用状态。
-2. **在浏览器里按一次 `Ctrl+R` 刷新页面**（安装或更新后必须刷新，让 `client.js` 重新注册插槽）。
-3. 左侧栏会出现「架构透视」图标（面板 id = `anatomy`），点击它。
-4. 主区域整页打开「DSH 架构透视 · 实时架构」；再点一次侧栏图标或切换到其他面板即可关闭。
-5. 首帧快照到达前显示 `connecting` 骨架，之后变为 `live`。
-
-> 需要 Host 与 Client 两半都安装：Host 提供 HTTP 数据接口，Client 提供侧栏图标和整页界面。
-
 ## 页面结构
 
 Header（标题 + DSH 版本/Node/profile/pid 副标题 + 连接状态点 + 事件计数 + `?` 帮助 + 暂停/继续 + 折叠按钮）、
@@ -83,7 +97,7 @@ Header（标题 + DSH 版本/Node/profile/pid 副标题 + 连接状态点 + 事�
 
 ### 2. 组件架构
 
-- 可搜索的完整清单：插件（按 bundle 分组、按状态排序，显示 fiberPhase）、服务（提供者/方法）、
+- 可搜索的完整清单：插件（按 bundle 分组、按状态排序、显示 fiberPhase）、服务（提供者/方法）、
   工具（调用数 / 平均耗时）、客户端包、模型、MCP 相关条目。
 - 点选任意插件 / 服务 / 工具 / 组件域 → 右栏显示详情（来源、状态、描述、方法列表、最近事件、数据字段）。
 - 顶部有过滤框，输入关键词即时过滤整份清单。
@@ -205,7 +219,7 @@ Header（标题 + DSH 版本/Node/profile/pid 副标题 + 连接状态点 + 事�
   `after` 小于缓冲区起点时返回 `reset:true`，客户端自动全量重拉。
 - 工具指标由 Host 聚合：calls / errors / avgMs / minMs / maxMs（「耗时分布 · 近 120s」的数据来源）。
 - 工具 → 组件域映射已补全：MCP / 网络工具 → 网络/MCP、Hindsight / 技能 → 记忆技能、session 工具 → 会话日志、
-  代理 / 团队 / 工作流 / 定时 → 子代理/工作流、工作区 / 终端 → 写入终端、goal / todo → 会话循环、
+  代理 / Agent Team / 工作流 / 定时 → 子代理/工作流、工作区 / 终端 → 写入终端、goal / todo → 会话循环、
   present → Web UI 客户端、cordis / lsp → Cordis 内核；未知工具默认归入 Cordis 内核（不再因自环丢线）。
 - **Client 侧**（`client.js`）：优先 `fetch` + `ReadableStream` 逐行解析 NDJSON 长连接
   （基址优先 `window.__DSH_TRANSPORT__.streamBaseUrl`，否则按页面相对路径解析）；
@@ -238,23 +252,14 @@ curl "http://127.0.0.1:64724/dsh-anatomy/api/events?after=0&limit=50"
 curl -N http://127.0.0.1:64724/dsh-anatomy/api/stream
 ```
 
-## 安装与刷新
-
-- 包目录：`plug-in/dsh-anatomy`，本地 bundle（`package.json` 声明 `dsh.bundle.patch`），无需构建。
-- 无第三方依赖：Host 只用 Node 内置模块与 `ctx`，Client 只 `require('react')`。
-- 安装路径：通过 DSH 的 Plugin Manager 安装本地 bundle（或按团队既有流程安装）；安装后确认插件已启用。
-- **刷新要求**：安装、升级或热重载 Host/Client 代码后，浏览器需按一次 `Ctrl+R` 刷新；
-  否则旧页面可能拿不到新的侧栏图标 / 主区域插槽。
-- 卸载时，路由、监听器、定时器和打开的流连接都会随 `ctx.effect` 清理，不留后台定时器。
-
 ## 故障排查
 
 ### `ping` 不通
 
 1. 先确认 DSH Web 正在运行，且浏览器地址的 origin 与预期一致（默认 `http://127.0.0.1:64724`，
    反代场景请用实际 origin 或带前缀的地址）。
-2. 确认 `dsh-anatomy` bundle 已安装并启用；DSH 版本是否在兼容范围内（见下）。
-3. 404：路由未注册 → 插件未激活或 Host 半加载失败，查看 DSH 日志 / Plugin Manager 中的 fiber 状态。
+2. 确认 `dsh-anatomy` 已安装并启用；DSH 版本是否在兼容范围内（见下）。
+3. 404：路由未注册 → 插件未激活或 Host 部分加载失败，查看 DSH 日志 / Plugin Manager 中的 fiber 状态。
 4. 连接被拒：DSH Web 未启动，或端口/代理配置不对。
 
 ### 页面能打开但没有数据
@@ -270,34 +275,49 @@ curl -N http://127.0.0.1:64724/dsh-anatomy/api/stream
 2. DSH 重启或 HMR 后，Client 会按 1s/2s/5s/10s 递增退避自动重连。
 3. 长时间 offline：检查浏览器是否能访问 `/dsh-anatomy/api/ping`，以及页面是否有网络/权限拦截。
 
-### 自检脚本
+### 开发者自检
 
-```bash
-# 从仓库根目录执行；origin 可省略
-node _analysis/anatomy/verify-live.mjs http://127.0.0.1:64724
-
-# Host 半（index.js）构建完成后，可在 _analysis/anatomy 下运行假 ctx 集成自测
-node selftest-host.mjs
-```
+- 语法检查：`node --check index.js && node --check client.js`。
+- 接口自检：`GET /dsh-anatomy/api/ping` 返回 `ok:true`；`GET /dsh-anatomy/api/snapshot` 中
+  `schemaVersion` 为 1 且 `organs` 为 14 项。
+- Host 集成：可在本地用假 Cordis `ctx` 调用 `apply()`，断言 4 条 exact 路由、快照字段与清理逻辑；
+  该集成 harness 不随插件包发布。
 
 ## 隐私说明
 
-- 只采集**调用元数据**：工具名、耗时、成功/失败、参数预览（JSON.stringify 截断 160 字符）、
-  模型 provider/model/tokens、会话事件类型与少量精简字段、插件/服务/纤维拓扑。
+- 只采集**调用元数据**：工具名、耗时、成功/失败、参数 / 结果预览（JSON.stringify 截断 160 字符）、
+  模型 provider/model/tokens 用量、会话事件类型与少量精简字段、插件/服务/纤维拓扑。
 - **不采集**消息正文、文件内容、凭据/密钥明文；不落盘、不上传、不发起任何外网请求，也没有遥测。
 - 事件只存在于 Host 进程内存的 ring buffer（最多 4000 条），进程退出即消失；快照按需在内存中拼装。
 - 全部为只读旁路观察：不写会话日志、不改配置、不改变工具/模型/会话行为。
 
-## 兼容性
+## 兼容性与许可
 
-- **DSH 0.2.x**；需要 Host（`index.js`）与 Client（`client.js`）两半同时安装。
+- **DSH 0.2.x**（已在 0.2.1-rc.5 实测）；Host（`index.js`）与 Client（`client.js`）随同一插件包发布，无需分别安装。
+- **Node.js ≥ 20**（与 DSH 运行时一致）。
+- 无第三方运行时依赖：Host 仅使用 Node 内置模块与 Cordis `ctx`，Client 仅使用平台内置的 `react`。
 - 快照/接口 `schemaVersion: 1`，与当前实现契约一致；跨版本变更会提升版本号。
-- 无第三方依赖；右栏与底部总览卡片的表面色跟随宿主主题 token 自动适配（浅色主题白底 / 深色主题深色），舞台架构图保持深色 HUD。
+- 右栏与底部总览卡片的表面色跟随宿主主题 token 自动适配（浅色主题白底 / 深色主题深色），舞台架构图保持深色 HUD。
 - 浏览器需支持 `fetch` + `ReadableStream`（Chrome / Edge / Firefox / Safari 近两年版本）；
   不支持流式读取时自动退化为轮询。
+- **License：MIT**（见 [LICENSE](LICENSE)）。
+- 仓库：<https://github.com/h2298511604-ops/dsh-anatomy> ·
+  问题反馈：<https://github.com/h2298511604-ops/dsh-anatomy/issues> 。
 
 ## 版本
 
 - 当前版本：**1.0.0**
 - 图标 `icon.svg` 为本项目自绘原创 SVG（256×256）：深色圆角 HUD 面板 + 分层节点卡片与发光连线 +
   流动光点 + 右上活动脉冲 + 细网格；无外部引用/脚本/字体/位图，可随包分发。
+
+## English summary
+
+`dsh-anatomy` is a DSH plugin that renders the running DeepSeek Harness as a live architecture map:
+five layers, fourteen component domains, and the real tool/model/session call flow drawn as moving
+dots along observed edges over the last 120 seconds. It adds an "Architecture" (架构透视) icon to the
+sidebar that opens a full-page HUD with four views — runtime metrics, component architecture, call log
+and timeline. All data comes from read-only side-channel observation of Cordis topology and
+tool/model/session events; it never mutates tool behaviour, sessions or user data, and keeps events in
+memory only. Install it from the community market (when listed) or with
+`dsh plugin add github:h2298511604-ops/dsh-anatomy` (`dsh plugin add dsh-anatomy` after the npm
+release), then reload the page once. Requires DSH 0.2.x and Node.js ≥ 20; MIT licensed.
