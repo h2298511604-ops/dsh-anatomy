@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH 架构透视",
+    "description": "把整个 DeepSeek Harness 画成一张实时架构图：插件、服务、工具、会话/Agent、模型、MCP 等组件，以及工具调用、模型调用、会话事件构成的实时数据流。"
+  }
+}

@@ -1,0 +1,219 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="anatomyIconTitle">
+  <title id="anatomyIconTitle">dsh-anatomy — real-time DSH architecture map HUD</title>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#030811"/>
+      <stop offset="0.52" stop-color="#06131f"/>
+      <stop offset="1" stop-color="#040b14"/>
+    </linearGradient>
+    <linearGradient id="nodeGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b2433"/>
+      <stop offset="1" stop-color="#071620"/>
+    </linearGradient>
+    <linearGradient id="kernelGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0c2334"/>
+      <stop offset="1" stop-color="#06121b"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="0.5" cy="0.44" r="0.72">
+      <stop offset="0" stop-color="#0b2a3a" stop-opacity="0.5"/>
+      <stop offset="0.65" stop-color="#061a26" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#02060b" stop-opacity="0.6"/>
+    </radialGradient>
+    <radialGradient id="pulseHalo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#8effc9" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#3ddc97" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="16" height="16" patternUnits="userSpaceOnUse">
+      <path d="M16 0H0V16" fill="none" stroke="#38e8ff" stroke-opacity="0.055" stroke-width="0.7"/>
+    </pattern>
+    <pattern id="gridFine" width="4" height="4" patternUnits="userSpaceOnUse">
+      <path d="M4 0H0V4" fill="none" stroke="#38e8ff" stroke-opacity="0.02" stroke-width="0.5"/>
+    </pattern>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="1.8"/>
+    </filter>
+    <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+      <path d="M0 0L6 3L0 6Z" fill="#3ee8ff" fill-opacity="0.8"/>
+    </marker>
+    <clipPath id="panelClip">
+      <rect x="8" y="8" width="240" height="240" rx="48"/>
+    </clipPath>
+  </defs>
+
+  <!-- HUD panel -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="url(#bgGrad)" stroke="#164a5e" stroke-opacity="0.85" stroke-width="1"/>
+  <g clip-path="url(#panelClip)">
+    <rect x="8" y="8" width="240" height="240" fill="url(#grid)"/>
+    <rect x="8" y="8" width="240" height="240" fill="url(#gridFine)"/>
+    <rect x="8" y="8" width="240" height="240" fill="url(#vignette)"/>
+    <!-- layer guides -->
+    <g fill="none" stroke="#38e8ff" stroke-dasharray="2 6">
+      <path d="M30 120H226" stroke-opacity="0.07"/>
+      <path d="M30 182H226" stroke-opacity="0.07"/>
+    </g>
+    <!-- layer ticks -->
+    <g stroke="#38e8ff" stroke-linecap="round" stroke-width="1.4">
+      <path d="M28 80V96" stroke-opacity="0.28"/>
+      <path d="M28 142V158" stroke-opacity="0.28"/>
+      <path d="M28 198V214" stroke-opacity="0.28"/>
+    </g>
+    <g fill="#38e8ff">
+      <circle cx="28" cy="80" r="1.5" opacity="0.45"/>
+      <circle cx="28" cy="142" r="1.5" opacity="0.45"/>
+      <circle cx="28" cy="198" r="1.5" opacity="0.45"/>
+    </g>
+    <rect x="8" y="8" width="240" height="240" rx="48" fill="none" stroke="#38e8ff" stroke-opacity="0.1" stroke-width="6"/>
+  </g>
+
+  <!-- connectors: layered architecture edges -->
+  <g fill="none" stroke="#22d3ee" stroke-opacity="0.62" stroke-width="1.5" stroke-linecap="round" filter="url(#glow)">
+    <path d="M74 102V130" marker-end="url(#arrow)"/>
+    <path d="M182 102V130" marker-end="url(#arrow)"/>
+    <path d="M108 88H142" marker-end="url(#arrow)"/>
+    <path d="M74 164Q74 184 102 189" marker-end="url(#arrow)"/>
+    <path d="M182 164Q182 184 154 189" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- flowing packets on the edges -->
+  <g>
+    <g fill="#d9feff" opacity="0.16">
+      <circle cx="126" cy="88" r="3.4"/>
+      <circle cx="74" cy="117" r="3.4"/>
+      <circle cx="182" cy="117" r="3.4"/>
+      <circle cx="84" cy="176" r="3.4"/>
+      <circle cx="172" cy="176" r="3.4"/>
+    </g>
+    <g fill="#eafeff">
+      <circle cx="126" cy="88" r="1.7" opacity="0.95"/>
+      <circle cx="74" cy="117" r="1.7" opacity="0.95"/>
+      <circle cx="182" cy="117" r="1.7" opacity="0.95"/>
+      <circle cx="84" cy="176" r="1.7" opacity="0.9"/>
+      <circle cx="172" cy="176" r="1.7" opacity="0.9"/>
+    </g>
+  </g>
+
+  <!-- kernel host band -->
+  <g>
+    <rect x="64" y="196" width="128" height="20" rx="6" fill="url(#kernelGrad)" stroke="#3ee8ff" stroke-opacity="0.34" stroke-width="1"/>
+    <g stroke="#3ee8ff" stroke-opacity="0.18" stroke-width="1">
+      <path d="M96 200V212"/>
+      <path d="M128 200V212"/>
+      <path d="M160 200V212"/>
+    </g>
+    <circle cx="80" cy="206" r="4" fill="url(#pulseHalo)" opacity="0.5"/>
+    <circle cx="80" cy="206" r="1.6" fill="#3ddc97" opacity="0.85"/>
+    <circle cx="128" cy="206" r="4.2" fill="url(#pulseHalo)" opacity="0.4"/>
+    <circle cx="128" cy="206" r="2" fill="#7ef6ff" opacity="0.9"/>
+    <circle cx="176" cy="206" r="1.6" fill="#4f9dff" opacity="0.85"/>
+  </g>
+
+  <!-- architecture nodes -->
+  <!-- node: entry layer, left -->
+  <g>
+    <rect x="40" y="74" width="68" height="28" rx="8" fill="url(#nodeGrad)" stroke="#3ee8ff" stroke-opacity="0.55" stroke-width="1.2"/>
+    <line x1="48" y1="77" x2="72" y2="77" stroke="#3ee8ff" stroke-opacity="0.4" stroke-width="1.4" stroke-linecap="round"/>
+    <rect x="48" y="83" width="10" height="10" rx="3" fill="#0a2432" stroke="#45e6ff" stroke-opacity="0.6" stroke-width="1"/>
+    <circle cx="53" cy="88" r="1.4" fill="#8df7ff" opacity="0.9"/>
+    <line x1="63" y1="86" x2="91" y2="86" stroke="#67f0ff" stroke-opacity="0.34" stroke-width="1.6" stroke-linecap="round"/>
+    <line x1="63" y1="92" x2="83" y2="92" stroke="#67f0ff" stroke-opacity="0.22" stroke-width="1.4" stroke-linecap="round"/>
+    <line x1="63" y1="97" x2="63" y2="94" stroke="#3ddc97" stroke-opacity="0.5" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="67" y1="97" x2="67" y2="93" stroke="#3ddc97" stroke-opacity="0.5" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="71" y1="97" x2="71" y2="95" stroke="#3ddc97" stroke-opacity="0.5" stroke-width="1.2" stroke-linecap="round"/>
+    <circle cx="99" cy="83" r="3.6" fill="#3ddc97" opacity="0.16"/>
+    <circle cx="99" cy="83" r="2" fill="#3ddc97" opacity="0.9"/>
+  </g>
+
+  <!-- node: reasoning layer, right -->
+  <g>
+    <rect x="148" y="74" width="68" height="28" rx="8" fill="url(#nodeGrad)" stroke="#3ee8ff" stroke-opacity="0.55" stroke-width="1.2"/>
+    <line x1="156" y1="77" x2="180" y2="77" stroke="#3ee8ff" stroke-opacity="0.4" stroke-width="1.4" stroke-linecap="round"/>
+    <rect x="156" y="83" width="10" height="10" rx="3" fill="#0a2432" stroke="#45e6ff" stroke-opacity="0.6" stroke-width="1"/>
+    <path d="M158.5 88L161 90.5L164 85.5" fill="none" stroke="#8df7ff" stroke-opacity="0.9" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="171" y1="86" x2="199" y2="86" stroke="#67f0ff" stroke-opacity="0.34" stroke-width="1.6" stroke-linecap="round"/>
+    <line x1="171" y1="92" x2="191" y2="92" stroke="#67f0ff" stroke-opacity="0.22" stroke-width="1.4" stroke-linecap="round"/>
+    <line x1="171" y1="97" x2="171" y2="94" stroke="#3ddc97" stroke-opacity="0.5" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="175" y1="97" x2="175" y2="92" stroke="#3ddc97" stroke-opacity="0.5" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="179" y1="97" x2="179" y2="95" stroke="#3ddc97" stroke-opacity="0.5" stroke-width="1.2" stroke-linecap="round"/>
+    <circle cx="207" cy="83" r="3.6" fill="#3ddc97" opacity="0.16"/>
+    <circle cx="207" cy="83" r="2" fill="#3ddc97" opacity="0.9"/>
+  </g>
+
+  <!-- node: execution layer, left -->
+  <g>
+    <rect x="40" y="136" width="68" height="28" rx="8" fill="url(#nodeGrad)" stroke="#3ee8ff" stroke-opacity="0.55" stroke-width="1.2"/>
+    <line x1="48" y1="139" x2="72" y2="139" stroke="#3ee8ff" stroke-opacity="0.4" stroke-width="1.4" stroke-linecap="round"/>
+    <rect x="48" y="145" width="10" height="10" rx="3" fill="#0a2432" stroke="#45e6ff" stroke-opacity="0.6" stroke-width="1"/>
+    <path d="M50.5 150H53.5M50.5 147.5H55.5M50.5 152.5H55.5" fill="none" stroke="#8df7ff" stroke-opacity="0.85" stroke-width="0.9" stroke-linecap="round"/>
+    <line x1="63" y1="148" x2="91" y2="148" stroke="#67f0ff" stroke-opacity="0.34" stroke-width="1.6" stroke-linecap="round"/>
+    <line x1="63" y1="154" x2="83" y2="154" stroke="#67f0ff" stroke-opacity="0.22" stroke-width="1.4" stroke-linecap="round"/>
+    <line x1="63" y1="159" x2="63" y2="156" stroke="#4f9dff" stroke-opacity="0.55" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="67" y1="159" x2="67" y2="155" stroke="#4f9dff" stroke-opacity="0.55" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="71" y1="159" x2="71" y2="157" stroke="#4f9dff" stroke-opacity="0.55" stroke-width="1.2" stroke-linecap="round"/>
+    <circle cx="99" cy="145" r="3.6" fill="#4f9dff" opacity="0.16"/>
+    <circle cx="99" cy="145" r="2" fill="#4f9dff" opacity="0.85"/>
+  </g>
+
+  <!-- node: state layer, right -->
+  <g>
+    <rect x="148" y="136" width="68" height="28" rx="8" fill="url(#nodeGrad)" stroke="#3ee8ff" stroke-opacity="0.55" stroke-width="1.2"/>
+    <line x1="156" y1="139" x2="180" y2="139" stroke="#3ee8ff" stroke-opacity="0.4" stroke-width="1.4" stroke-linecap="round"/>
+    <rect x="156" y="145" width="10" height="10" rx="3" fill="#0a2432" stroke="#45e6ff" stroke-opacity="0.6" stroke-width="1"/>
+    <g fill="#8df7ff" opacity="0.85">
+      <circle cx="159.5" cy="148.5" r="0.9"/>
+      <circle cx="162.5" cy="148.5" r="0.9"/>
+      <circle cx="159.5" cy="151.5" r="0.9"/>
+      <circle cx="162.5" cy="151.5" r="0.9"/>
+    </g>
+    <line x1="171" y1="148" x2="199" y2="148" stroke="#67f0ff" stroke-opacity="0.34" stroke-width="1.6" stroke-linecap="round"/>
+    <line x1="171" y1="154" x2="191" y2="154" stroke="#67f0ff" stroke-opacity="0.22" stroke-width="1.4" stroke-linecap="round"/>
+    <line x1="171" y1="159" x2="171" y2="156" stroke="#4f9dff" stroke-opacity="0.55" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="175" y1="159" x2="175" y2="154" stroke="#4f9dff" stroke-opacity="0.55" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="179" y1="159" x2="179" y2="157" stroke="#4f9dff" stroke-opacity="0.55" stroke-width="1.2" stroke-linecap="round"/>
+    <circle cx="207" cy="145" r="3.6" fill="#4f9dff" opacity="0.16"/>
+    <circle cx="207" cy="145" r="2" fill="#4f9dff" opacity="0.85"/>
+  </g>
+
+  <!-- activity pulse (top-right) -->
+  <g>
+    <circle cx="196" cy="52" r="12" fill="none" stroke="#3ddc97" stroke-opacity="0.18" stroke-width="1"/>
+    <circle cx="196" cy="52" r="8" fill="none" stroke="#3ddc97" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="2 3"/>
+    <circle cx="196" cy="52" r="7" fill="url(#pulseHalo)" opacity="0.7"/>
+    <circle cx="196" cy="52" r="3.2" fill="#8effc9" filter="url(#softGlow)"/>
+    <circle cx="196" cy="52" r="1.4" fill="#ffffff" opacity="0.95"/>
+    <circle cx="182" cy="42" r="1.1" fill="#3ddc97" opacity="0.3"/>
+    <circle cx="175" cy="35" r="0.9" fill="#3ddc97" opacity="0.18"/>
+  </g>
+
+  <!-- HUD corner brackets -->
+  <g fill="none" stroke="#5ef1ff" stroke-opacity="0.5" stroke-width="1.5" stroke-linecap="round">
+    <path d="M26 44V31Q26 26 31 26H44"/>
+    <path d="M212 26H225Q230 26 230 31V44"/>
+    <path d="M230 212V225Q230 230 225 230H212"/>
+    <path d="M44 230H31Q26 230 26 225V212"/>
+  </g>
+  <g fill="#5ef1ff">
+    <circle cx="26" cy="44" r="1.2" opacity="0.45"/>
+    <circle cx="230" cy="44" r="1.2" opacity="0.45"/>
+    <circle cx="230" cy="212" r="1.2" opacity="0.45"/>
+    <circle cx="26" cy="212" r="1.2" opacity="0.45"/>
+  </g>
+
+  <!-- bottom status ticks -->
+  <g stroke="#38e8ff" stroke-linecap="round">
+    <path d="M32 232H56" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M62 232H68" stroke-opacity="0.16" stroke-width="1.3"/>
+    <path d="M188 232H224" stroke-opacity="0.2" stroke-width="1.3"/>
+  </g>
+  <g>
+    <circle cx="26" cy="232" r="1.4" fill="#3ddc97" opacity="0.5"/>
+    <circle cx="176" cy="232" r="1.4" fill="#38e8ff" opacity="0.35"/>
+    <circle cx="182" cy="232" r="1.4" fill="#38e8ff" opacity="0.2"/>
+  </g>
+</svg>

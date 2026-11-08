@@ -1,0 +1,60 @@
+{
+  "name": "dsh-anatomy",
+  "version": "1.0.0",
+  "description": "DSH architecture view: a live, layered architecture map of the DeepSeek Harness (plugins, services, tools, sessions, models, MCP) with the real-time call flow between them.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "author": "h2298511604-ops",
+  "homepage": "https://github.com/h2298511604-ops/dsh-anatomy#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/h2298511604-ops/dsh-anatomy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/h2298511604-ops/dsh-anatomy/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "architecture",
+    "observability",
+    "visualization"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  }
+}

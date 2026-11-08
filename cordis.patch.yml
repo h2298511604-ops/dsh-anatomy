@@ -1,0 +1,5 @@
+# dsh-anatomy bundle patch: inserts the plugin into a DSH profile's layer stack.
+# The Host half is `index.js`; the Web UI half is `client.js` (declared by dsh.client).
+- insert:
+    - id: dsh-anatomy
+      name: 'dsh-anatomy'

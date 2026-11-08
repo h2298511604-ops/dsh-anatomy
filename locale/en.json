@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH Architecture",
+    "description": "A live architecture map of the whole Harness: plugins, services, tools, sessions/agents, models and MCP, with the real-time flow of tool calls, model calls and session events."
+  }
+}
