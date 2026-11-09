@@ -23,7 +23,7 @@
 
 - **dshmarket（社区插件市场）**：插件 → 发现 → 搜索 `dsh-anatomy` → 安装（被收录后）。
 - **GitHub 源码安装**：`dsh plugin add github:h2298511604-ops/dsh-anatomy`
-- **npm（发布后）**：`dsh plugin add dsh-anatomy`
+- **npm**：`dsh plugin add dsh-anatomy`（[npmjs.com/package/dsh-anatomy](https://www.npmjs.com/package/dsh-anatomy)）
 
 安装 / 更新后刷新页面一次（`Ctrl+R`）；左侧栏出现「架构透视」图标；若没有，确认插件已启用。
 仓库即插件包（Host 与 Client 都是原生模块），无需构建步骤；卸载后路由、监听器、定时器与打开的流连接会随
