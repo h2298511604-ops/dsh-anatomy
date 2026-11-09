@@ -584,6 +584,24 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Drawer breadcrumb like “工具调用视图 › 工具详情”. */
+    function selectionBreadcrumb(selection, view, t) {
+      const viewLabel = view === 'tools' ? t('viewTools') : t('viewDomains')
+      const detailKeys = {
+        domain: 'domainDetail', plugin: 'pluginDetail', service: 'serviceDetail',
+        tool: 'toolDetail', event: 'eventDetail', edge: 'edgeDetail',
+        clientBundle: 'clientBundleDetail', model: 'modelDetail',
+      }
+      const detailKey = selection && detailKeys[selection.type] ? detailKeys[selection.type] : 'overview'
+      return viewLabel + ' › ' + t(detailKey)
+    }
+
+    /** Back button label: history-aware, never changes the view mode. */
+    function selectionBackLabel(selection, view, historyDepth, t) {
+      if (historyDepth > 0) return t('backPrevious')
+      return view === 'tools' ? t('backTools') : t('backDomains')
+    }
+
     function readThemeColors() {
       const read = (name, fallback) => {
         const value = safe(() => {
@@ -1579,7 +1597,7 @@ window.__ModuleLoader__.load({
 
     /** Anchor offset clamped to the node boundary side extent. */
     function clampSideOffset(side, value) {
-      const limit = side === 'left' || side === 'right' ? NODE_H / 2 - 6 : NODE_W / 2 - 6
+      const limit = side === 'left' || side === 'right' ? NODE_H / 2 - 4 : NODE_W / 2 - 4
       return clamp(num(value), -limit, limit)
     }
 
@@ -1625,17 +1643,17 @@ window.__ModuleLoader__.load({
       return out
     }
 
-    /** Lane offsets inside a gutter (spacing 8, total width ±28). */
+    /** Lane offsets inside a gutter (spacing 16, total width ±48). */
     function gutterLaneOffset(index) {
-      const sequence = [0, 8, 16, 24, 28, -8, -16, -24, -28]
+      const sequence = [0, 16, 32, 48, -16, -32, -48]
       return sequence[Math.abs(Math.floor(num(index))) % sequence.length]
     }
 
-    /** Adjacent columns: gentle horizontal S with adaptive control distance. */
+    /** Adjacent columns: moderate horizontal S (diagrams.net-like curvature). */
     function laneRouteAdjacent(start, startSide, end, endSide) {
       const outStart = sideOutwardVector(startSide)
       const outEnd = sideOutwardVector(endSide)
-      const distance = clamp(Math.abs(num(end.x) - num(start.x)) * 0.35, 24, 90)
+      const distance = clamp(Math.abs(num(end.x) - num(start.x)) * 0.5, 40, 140)
       return routeFromControls({
         x1: num(start.x), y1: num(start.y),
         c1x: round1(num(start.x) + outStart.x * distance), c1y: round1(num(start.y) + outStart.y * distance),
@@ -1644,12 +1662,12 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** Same column: vertical S curve, horizontal bow bounded to ±18. */
+    /** Same column: vertical S curve, horizontal bow bounded to ±22. */
     function laneRouteSameColumn(start, startSide, end, endSide) {
       const outStart = sideOutwardVector(startSide)
       const outEnd = sideOutwardVector(endSide)
-      const distance = clamp(Math.abs(num(end.y) - num(start.y)) * 0.35, 24, 90)
-      const bow = clamp((num(end.x) - num(start.x)) * 0.5, -18, 18)
+      const distance = clamp(Math.abs(num(end.y) - num(start.y)) * 0.5, 40, 140)
+      const bow = clamp((num(end.x) - num(start.x)) * 0.5, -22, 22)
       return routeFromControls({
         x1: num(start.x), y1: num(start.y),
         c1x: round1(num(start.x) + outStart.x * distance + bow), c1y: round1(num(start.y) + outStart.y * distance),
@@ -1709,7 +1727,7 @@ window.__ModuleLoader__.load({
     /** Cross-column route via a layer gutter, lane-separated from siblings. */
     function gutterRoute(start, startSide, end, endSide, gutterX, laneIndex) {
       const laneX = num(gutterX) + gutterLaneOffset(laneIndex)
-      const route = roundedRoute([start, { x: laneX, y: start.y }, { x: laneX, y: end.y }, end], 12)
+      const route = roundedRoute([start, { x: laneX, y: start.y }, { x: laneX, y: end.y }, end], 16)
       route.gutterX = num(gutterX)
       route.laneX = laneX
       return route
@@ -2199,6 +2217,7 @@ window.__ModuleLoader__.load({
       viewTimeline: '查看时间线', viewCallLog: '在调用日志中过滤', viewDomain: '查看组件域',
       colorLlm: 'LLM', colorTool: '工具', colorSession: '会话', colorFs: '文件', colorApproval: '审批', colorError: '错误', colorPlugin: '插件',
       resizeDrawer: '拖拽调整详情栏宽度', argsResult: '参数与结果', argsPreview: '参数', resultPreview: '结果',
+      back: '返回', backTools: '返回工具调用视图', backDomains: '返回组件域视图', backPrevious: '返回上一级',
       latencyDist: '耗时分布 · 近 120s', latencyMin: '最小', latencyAvg: '平均', latencyP50: '中位', latencyMax: '最大',
       relatedLlmCalls: '相关 LLM 调用', timestamp: '时间戳', usageTokens: '令牌用量', tokensIn: '输入', tokensOut: '输出',
       kindFs: '文件', kindShell: '终端', kindWeb: '网络', kindAgent: '代理', kindUi: '界面',
@@ -2304,6 +2323,7 @@ window.__ModuleLoader__.load({
       viewTimeline: 'View timeline', viewCallLog: 'Filter call log', viewDomain: 'View domain',
       colorLlm: 'LLM', colorTool: 'tool', colorSession: 'session', colorFs: 'fs', colorApproval: 'approval', colorError: 'error', colorPlugin: 'plugin',
       resizeDrawer: 'Drag to resize the detail panel', argsResult: 'Arguments & result', argsPreview: 'Arguments', resultPreview: 'Result',
+      back: 'Back', backTools: 'Back to tool-call view', backDomains: 'Back to domain view', backPrevious: 'Back one level',
       latencyDist: 'Latency distribution · last 120s', latencyMin: 'min', latencyAvg: 'avg', latencyP50: 'p50', latencyMax: 'max',
       relatedLlmCalls: 'Related LLM calls', timestamp: 'Timestamp', usageTokens: 'Token usage', tokensIn: 'input', tokensOut: 'output',
       kindFs: 'file', kindShell: 'terminal', kindWeb: 'network', kindAgent: 'agent', kindUi: 'ui',
@@ -2557,6 +2577,9 @@ window.__ModuleLoader__.load({
   .da-drawer { position: fixed; right: 0; top: 0; bottom: 0; width: min(92vw, 420px); min-width: 0; max-width: none; z-index: 40; box-shadow: -18px 0 40px rgba(0,0,0,0.45); }
 }
 .da-drawer-head { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 40px; padding: 6px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,0.08)); }
+.da-drawer-headtext { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.da-drawer-breadcrumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--da-mono); font-size: 9px; letter-spacing: 0.04em; color: var(--dsw-alias-label-secondary, #8fa3b8); }
+.da-drawer-back { flex: none; font-size: 14px; }
 .da-drawer-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--da-mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--dsw-alias-label-secondary, #8fa3b8); }
 .da-drawer-body { flex: 1 1 auto; min-height: 0; padding: 10px 12px 28px; overflow-x: hidden; }
 .da-drawer-body.da-scroll { overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
@@ -4431,7 +4454,7 @@ window.__ModuleLoader__.load({
         sideCounts[toBucket] = (sideCounts[toBucket] || 0) + 1
       }
       const sideSpan = function (side) {
-        return side === 'top' || side === 'bottom' ? NODE_W * 0.56 : NODE_H * 0.56
+        return side === 'top' || side === 'bottom' ? NODE_W * 0.72 : NODE_H * 0.72
       }
       const hoverEdgeKey = props.hoverEdgeKey || ''
       const highlightId = props.hoverId || (selection && selection.type === 'domain' ? selection.id : null)
@@ -4446,8 +4469,8 @@ window.__ModuleLoader__.load({
         const row = def.row
         const reverseKey = row.to + '>' + row.from
         const bidirectional = !!seenKey[reverseKey]
-        // Two independent curves: whole-curve normal offset (±10) plus separate anchors.
-        const lane = bidirectional ? (def.key < reverseKey ? -10 : 10) : 0
+        // Two independent curves: whole-curve normal offset (±20) plus separate anchors.
+        const lane = bidirectional ? (def.key < reverseKey ? -20 : 20) : 0
         const fromBucket = 'f:' + row.from + ':' + def.fromSide
         const toBucket = 't:' + row.to + ':' + def.toSide
         const fromIndex = sideSeen[fromBucket] || 0
@@ -4456,8 +4479,10 @@ window.__ModuleLoader__.load({
         sideSeen[toBucket] = toIndex + 1
         const fromOffsets = spreadOffsets(sideCounts[fromBucket], sideSpan(def.fromSide))
         const toOffsets = spreadOffsets(sideCounts[toBucket], sideSpan(def.toSide))
-        const start = sideAnchor(def.fromNode, def.fromSide, clampSideOffset(def.fromSide, (fromOffsets[fromIndex] || 0) + lane))
-        const end = sideAnchor(def.toNode, def.toSide, clampSideOffset(def.toSide, (toOffsets[toIndex] || 0) + lane))
+        const fromSpread = bidirectional ? (fromOffsets[fromIndex] || 0) * 0.3 : (fromOffsets[fromIndex] || 0)
+        const toSpread = bidirectional ? (toOffsets[toIndex] || 0) * 0.3 : (toOffsets[toIndex] || 0)
+        const start = sideAnchor(def.fromNode, def.fromSide, clampSideOffset(def.fromSide, fromSpread + lane))
+        const end = sideAnchor(def.toNode, def.toSide, clampSideOffset(def.toSide, toSpread + lane))
         const obstacles = buildObstacles(nodes, 6, [row.from, row.to])
         const colA = columnIndexOf(def.fromNode)
         const colB = columnIndexOf(def.toNode)
@@ -6671,7 +6696,14 @@ window.__ModuleLoader__.load({
           onPointerCancel: onResizeUp,
         }),
         h('div', { className: 'da-drawer-head' },
-          h('span', { className: 'da-drawer-title', title: titleText }, titleText),
+          selection ? h('button', {
+            type: 'button', className: 'da-btn da-btn-icon da-drawer-back', onClick: props.onBack,
+            title: props.backLabel || t('back'), 'aria-label': props.backLabel || t('back'),
+          }, '←') : null,
+          h('div', { className: 'da-drawer-headtext' },
+            h('span', { className: 'da-drawer-breadcrumb', title: props.breadcrumb || '' }, props.breadcrumb || ''),
+            h('span', { className: 'da-drawer-title', title: titleText }, titleText)
+          ),
           selection ? h('button', {
             type: 'button', className: 'da-btn da-btn-icon', onClick: props.onClear,
             title: t('close'), 'aria-label': t('close'),
@@ -7249,6 +7281,7 @@ window.__ModuleLoader__.load({
       const [heat, setHeat] = React.useState({})
       const [spark, setSpark] = React.useState([])
       const [selection, setSelection] = React.useState(null)
+      const [historyDepth, setHistoryDepth] = React.useState(0)
       const [tab, setTab] = React.useState('metrics')
       const [railCollapsed, setRailCollapsed] = React.useState(false)
       const [drawerCollapsed, setDrawerCollapsed] = React.useState(false)
@@ -7266,6 +7299,8 @@ window.__ModuleLoader__.load({
       const [isDark, setIsDark] = React.useState(function () { return resolveThemeDark(props.anatomyTheme) })
 
       const rootRef = React.useRef(null)
+      const selectionRef = React.useRef(null)
+      const historyRef = React.useRef([])
       const eventsRef = React.useRef([])
       const pausedRef = React.useRef(false)
       const heatRef = React.useRef(Object.create(null))
@@ -7580,35 +7615,62 @@ window.__ModuleLoader__.load({
         setDrawerCollapsed(false)
       }, [])
 
-      const selectDomain = React.useCallback(function (domainId) {
-        if (!domainId) return
-        setSelection({ type: 'domain', id: domainId })
+      // Detail navigation history: every selection change pushes the previous
+      // one so the drawer can go back one level. The view mode is untouched.
+      const navigateSelection = React.useCallback(function (next) {
+        if (!next || typeof next !== 'object') return
+        const previous = selectionRef.current
+        if (previous && previous.type === next.type && previous.id === next.id) {
+          openDrawer()
+          return
+        }
+        if (previous) {
+          historyRef.current = historyRef.current.concat([previous]).slice(-20)
+          setHistoryDepth(historyRef.current.length)
+        }
+        selectionRef.current = next
+        setSelection(next)
         openDrawer()
       }, [openDrawer])
+
+      const goBackSelection = React.useCallback(function () {
+        const stack = historyRef.current.slice()
+        if (stack.length === 0) {
+          selectionRef.current = null
+          setSelection(null)
+          return
+        }
+        const previous = stack.pop()
+        historyRef.current = stack
+        setHistoryDepth(stack.length)
+        selectionRef.current = previous
+        setSelection(previous)
+      }, [])
+
+      const selectDomain = React.useCallback(function (domainId) {
+        if (!domainId) return
+        navigateSelection({ type: 'domain', id: domainId })
+      }, [navigateSelection])
 
       const selectAny = React.useCallback(function (next) {
         if (!next || typeof next !== 'object' || !next.type) return
         if (next.type !== 'event' && (next.id === undefined || next.id === null || next.id === '')) return
-        setSelection({ type: next.type, id: next.id })
-        openDrawer()
-      }, [openDrawer])
+        navigateSelection({ type: next.type, id: next.id })
+      }, [navigateSelection])
 
       const selectResult = React.useCallback(function (result) {
         if (!result || !result.type) return
-        setSelection({ type: result.type, id: result.id })
-        openDrawer()
-      }, [openDrawer])
+        navigateSelection({ type: result.type, id: result.id })
+      }, [navigateSelection])
 
       const selectEvent = React.useCallback(function (eventId) {
-        setSelection({ type: 'event', id: eventId })
-        openDrawer()
-      }, [openDrawer])
+        navigateSelection({ type: 'event', id: eventId })
+      }, [navigateSelection])
 
       const selectTool = React.useCallback(function (toolName) {
         if (!toolName) return
-        setSelection({ type: 'tool', id: toolName })
-        openDrawer()
-      }, [openDrawer])
+        navigateSelection({ type: 'tool', id: toolName })
+      }, [navigateSelection])
 
       const setHoveredEdgeSafe = React.useCallback(function (key) {
         setHoveredEdge(key ? { key: String(key) } : null)
@@ -7617,9 +7679,8 @@ window.__ModuleLoader__.load({
       const selectEdge = React.useCallback(function (next) {
         if (!next || !next.from || !next.to) return
         const mode = next.mode === 'tool' ? 'tool' : 'domain'
-        setSelection({ type: 'edge', from: String(next.from), to: String(next.to), mode: mode, id: String(next.from) + '>' + String(next.to) })
-        openDrawer()
-      }, [openDrawer])
+        navigateSelection({ type: 'edge', from: String(next.from), to: String(next.to), mode: mode, id: String(next.from) + '>' + String(next.to) })
+      }, [navigateSelection])
 
       const filterLog = React.useCallback(function (query) {
         setLogFilter({ query: String(query || ''), group: '', nonce: Date.now() })
@@ -7653,6 +7714,9 @@ window.__ModuleLoader__.load({
         const onKeyDown = function (event) {
           if (!event || (event.key !== 'Escape' && event.key !== 'Esc')) return
           setHelpOpen(false)
+          historyRef.current = []
+          setHistoryDepth(0)
+          selectionRef.current = null
           setSelection(null)
         }
         document.addEventListener('keydown', onKeyDown)
@@ -7662,6 +7726,9 @@ window.__ModuleLoader__.load({
       }, [])
 
       const clearSelection = React.useCallback(function () {
+        historyRef.current = []
+        setHistoryDepth(0)
+        selectionRef.current = null
         setSelection(null)
       }, [])
 
@@ -7711,6 +7778,10 @@ window.__ModuleLoader__.load({
             onSelect: selectAny, onSelectEvent: selectEvent, onClear: clearSelection,
             onFilterLog: filterLog,
             onTab: function (next) { setTab(next) },
+            onBack: goBackSelection,
+            historyDepth: historyDepth,
+            breadcrumb: selectionBreadcrumb(selection, view, t),
+            backLabel: selectionBackLabel(selection, view, historyDepth, t),
           })
         ),
         h(BottomConsole, {
@@ -7859,6 +7930,8 @@ window.__ModuleLoader__.load({
         splineRouteFromPoints: splineRouteFromPoints,
         routeSamples: routeSamples,
         rotatePlaceholder: undefined,
+        selectionBreadcrumb: selectionBreadcrumb,
+        selectionBackLabel: selectionBackLabel,
         columnIndexOf: columnIndexOf,
         layerGutters: layerGutters,
         gutterLaneOffset: gutterLaneOffset,
