@@ -1,6 +1,6 @@
 {
   "name": "dsh-anatomy",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "DSH architecture view: a live, layered architecture map of the DeepSeek Harness (plugins, services, tools, sessions, models, MCP) with the real-time call flow between them.",
   "type": "module",
   "main": "index.js",

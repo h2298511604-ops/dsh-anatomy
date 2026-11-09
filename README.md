@@ -29,10 +29,14 @@
 仓库即插件包（Host 与 Client 都是原生模块），无需构建步骤；卸载后路由、监听器、定时器与打开的流连接会随
 `ctx.effect` 清理，不留后台定时器。
 
-**打开方式**：点击左侧栏「架构透视」图标（面板 id = `anatomy`）→ 主区域整页打开
-「DSH 架构透视 · 实时架构」；再点一次侧栏图标或切换到其他面板即可关闭。打开时先收到约 4 KB 的
-**lite 快照**（14 个组件域的计数），骨架立即消失、舞台先出；随后全量快照（约 200 KB）到达后补全
-插件/服务/工具详情与连线，无需再等整页刷新。
+**打开方式**：
+
+- **整页**：点击左侧栏「架构透视」图标（面板 id = `anatomy`）→ 主区域整页打开「DSH 架构透视 · 实时架构」；
+  再点一次侧栏图标或切换到其他面板即可关闭。
+- **右侧栏 tab（紧凑版）**：会话 header 工具区（与底部开关同排）的架构图标按钮（title「在右侧栏打开架构透视」），
+  或右侧栏 guide 的「+」→「架构透视」；同一会话再次点击会聚焦 / 切回该 tab。左侧栏整页入口始终保留。
+- 打开时先收到约 5 KB 的 **lite 快照**（14 个组件域计数 + 会话摘要），骨架立即消失、舞台先出；随后约 200 KB
+  的全量快照到达后补全插件 / 服务 / 工具详情与连线；状态区会固定显示「首屏 xxx ms · 详情 xxx ms」。
 
 ## 它显示什么
 
@@ -56,12 +60,12 @@
 - **连线只来自真实观测到的调用**：按近 120s 的事件聚合出「来源 → 目标」边，只画实际发生过的调用；
   舞台右上角状态区显示 等待数据 / 运行中 / 已连接 · 空闲 / 已暂停 / 离线，按最近 15s 内是否有事件判定，
   并显示「最近事件：x 秒前」；无流量时一行小字提示「暂无调用 · 有调用时会在这里流动」，节点仍然可见。
-- **连线全部为平滑曲线，默认按 lane 布线**：相邻列用弧度适中的水平 S 曲线（控制点 = clamp(0.5×水平距离, 40, 140)）；
-  同列用垂直 S 曲线（横向弓 ≤22）；跨 2 列以上走层框之间空白 gutter（272 / 504 / 736 / 968）的 r=16 圆角折线，
-  同一 gutter 内多条线按 x lane 错开（间距 16、范围 ±48）避免重叠；只有 lane 仍撞到卡片时才回退到避障曲线。
-  双向流量画成两条整条平行偏移（法向 ±20）的独立曲线，各自有圆点与标签；端点从卡片边界按上 / 下 / 左 / 右
-  法向离开，不穿过卡片；没有反向流量时只画真实观测到的那一条，不造线。连线标签为「n 次/min」（近 120s 调用次数），
-  默认只在高频（≥5 次）或悬停 / 选中时显示。
+- **连线是自然 S 曲线 + 轻量局部避障**：锚点按 |dx| ≥ |dy| 选择左右或上下边，控制点 = clamp(0.5 × 主轴距离, 40, 160)；
+  若曲线与「非端点」组件卡片相交，则在局部候选（≤12：锚点对换 + 法向偏移 ±20 / 35 / 55 / 75）中挑选：
+  目标是与卡片保持 ≥8 间距、不绕大圈（不做 gutter 通道），按相交长度 / 最小间距 / 路径长度打分；
+  仍无完全避开的候选就取相交最少的一条。双向流量偏移 ±16、同向并行偏移 ±8；连线绘制在卡片之前，
+  穿过卡片的部分被卡片遮挡；没有反向流量时只画真实观测到的那一条，不造线。端点沿卡片边界法向离开。
+  连线标签为「n 次/min」（近 120s 调用次数），默认只在高频（≥5 次）或悬停 / 选中时显示。
 - **方向由圆点表示**：每条有流量的连线用严格沿自身曲线移动的 SVG 圆点标示方向（源 → 目标）；
   圆点数量与速度随近 120s 调用量增大，事件发生时出现对应类型颜色的更亮圆点。点击连线 → 右栏「调用关系详情」。
 - 圆点按调用类型着色：LLM=橙、工具=青、Session=紫、文件系统=蓝、审批=琥珀、错误=红、插件=品红；
@@ -83,9 +87,32 @@
 
 ## 页面结构
 
-Header（标题 + DSH 版本/Node/profile/pid 副标题 + 连接状态点 + 事件计数 + `?` 帮助 + 暂停/继续 + 折叠按钮）、
-左栏（14 组件域列表 + 全局搜索）、中间舞台（分层架构图 + 移动圆点层；纯净背景：单色底 + 极淡点阵 + 层虚线框；右上角运行状态 HUD；支持拖拽平移 / 滚轮缩放）、
-右栏（选中详情 / 运行总览，可拖拽调宽）、底部四个 tab（运行指标 / 组件架构 / 调用日志 / 时间线）。
+Header（标题 + DSH 版本/Node/profile/pid 副标题 + 视图开关 + 会话过滤下拉 + 连接状态点 + 事件计数 +
+`?` 帮助 + 暂停/继续 + 折叠按钮）、左栏（14 组件域列表 + 全局搜索）、
+中间舞台（分层架构图 + 移动圆点层；纯净背景：单色底 + 极淡点阵 + 层虚线框；右上角运行状态 HUD；
+支持拖拽平移 / 滚轮缩放）、右栏（选中详情 / 运行总览，可拖拽调宽）、
+底部四个 tab（运行指标 / 组件架构 / 调用日志 / 时间线）；另有会话右侧栏的紧凑版 tab（见下节）。
+
+## 右侧栏「架构透视」tab（紧凑版）
+
+除左侧栏整页入口外，架构透视还能作为会话右侧栏的一个 tab 打开（入口见「打开方式」），不离开当前会话即可查看：
+
+- 顶部：标题「架构透视」+ **会话下拉**（默认跟随当前会话，可切「全部会话」或其他会话）+ **状态 pill**
+  （运行中 / 已连接 · 空闲 / 已暂停 / 等待数据 / 离线 / 重连中）+「全屏」按钮。
+- 「舞台（缩略）」：整张架构图的缩略版，点击组件域即可选中。
+- 「全部组件域 · 14」：按 5 层分组的紧凑列表，每行 = 状态点 + 中文名 + 组成计数「Np · Ns · Nt」+「n 次/min」；
+  点击一行展开该组件域的紧凑详情（描述 / 代表作 / 最近事件），再点收起。
+- 底部：4 个指标（事件 (events/s)、工具调用 (calls/min)、Token (tokens/s)、平均耗时）+
+  「最近调用 · <会话>」最近 5 条（类型 / 标签 / 时间；无调用时显示空态提示）。
+- 首屏先渲染 lite 快照，全量数据未到时舞台角标显示「加载详情…」；连接中显示「正在连接 Host 数据流…」。
+
+## 首屏与性能
+
+- 打开面板时 Host 先推送约 **5 KB** 的 **lite 快照**（14 个组件域计数 + 会话摘要），骨架立即消失、舞台先出；
+  随后约 **200 KB** 的全量快照到达后补全插件 / 服务 / 工具详情与连线。
+- 舞台右上角状态区固定显示 **「首屏 xxx ms · 详情 xxx ms」** 两段耗时（首屏 = lite 帧渲染完成，详情 = 全量帧补全）；
+  未测完时分别显示「首屏计时中… / 详情计时中…」，全量到达前舞台角标显示「加载详情…」。
+- 底部四个面板等全量帧到达后再延迟一帧挂载，保证首屏绘制不被底部内容拖慢。
 
 ## 四个视图
 
@@ -129,6 +156,13 @@ Header（标题 + DSH 版本/Node/profile/pid 副标题 + 连接状态点 + 事�
 - 默认只画 **Top 8 有流量工具**的连线（无流量工具不画线）；面板右上角「显示全部连线 / 仅 Top 8」开关可切换，
   悬停 / 点击工具会高亮其连线并淡化其它元素；连线为平缓曲线，标签默认在 ≥2 次或悬停 / 选中时显示；
   点「← 组件域视图」返回；布局与行距已修，不与单位标签 / 内核带重叠。
+
+### 按会话查看
+
+- Header 的「会话过滤」下拉列出「全部会话」与快照 / 最近事件中出现过的各会话标题；当前活跃会话带「(当前)」标记。
+- 选中某个会话后，舞台连线、近 120s 计数与各项指标、工具调用视图、调用日志、时间线、因果链都只统计该会话；
+  下拉选回「全部会话」，或点右侧「×」（清除会话过滤）即可恢复全量。
+- 右侧栏紧凑版默认跟随当前会话，也可在它自己的会话下拉里切换会话或「全部会话」。
 
 ### 图例（默认折叠为「图例 ⓘ」）
 
@@ -237,7 +271,7 @@ Header（标题 + DSH 版本/Node/profile/pid 副标题 + 连接状态点 + 事�
 | GET | `/dsh-anatomy/api/ping` | 安装自检 | `ok:true`、`plugin:'dsh-anatomy'`、`schemaVersion:1`、`uptimeMs` |
 | GET | `/dsh-anatomy/api/snapshot` | 完整快照 | `ok`、`schemaVersion:1`、`generatedAt`、`seq`、`runtime`、`organs[14]`、`plugins`、`services`、`tools`、`agents`、`models`、`bundles`、`clientBundles`、`topology`、`counts`、`live`、`orgMetrics`、`toolMetrics` |
 | GET | `/dsh-anatomy/api/events?after=<seq>&limit=<n>` | 轮询增量 | `ok`、`seq`（轮询游标=本页最后一条事件 id）、`reset`、`events[]`、`metrics`、`orgMetrics`、`toolMetrics`、`snapshotChanged` |
-| GET | `/dsh-anatomy/api/stream` | NDJSON 长连接 | 每行一个 JSON：`hello` → `snapshot`（lite，~4 KB，先用轻量计数渲染首屏）→ `snapshot`（全量）→ 每 ~2s 推 `metrics` 帧（运行指标/sparkline 数据源）→ 有事件时约 250ms 一帧 `events`；拓扑变化推 `snapshot`；空闲 15s 推 `ping` |
+| GET | `/dsh-anatomy/api/stream` | NDJSON 长连接 | 每行一个 JSON：`hello` → `snapshot`（lite，~5 KB：14 域计数 + 会话摘要，先渲染首屏）→ `snapshot`（全量，~200 KB）→ 每 ~2s 推 `metrics` 帧（运行指标/sparkline 数据源）→ 有事件时约 250ms 一帧 `events`；拓扑变化推 `snapshot`；空闲 15s 推 `ping` |
 
 非 GET 请求返回 `405`；其他路径不注册 fallback。handler 内部全部 try/catch，异常时返回
 `{ok:false,error:<message>}` 且不冒泡。
@@ -317,7 +351,9 @@ curl -N http://127.0.0.1:64724/dsh-anatomy/api/stream
 five layers, fourteen component domains, and the real tool/model/session call flow drawn as moving
 dots along observed edges over the last 120 seconds. It adds an "Architecture" (架构透视) icon to the
 sidebar that opens a full-page HUD with four views — runtime metrics, component architecture, call log
-and timeline. All data comes from read-only side-channel observation of Cordis topology and
+and timeline. It can also open as a compact tab in the conversation right sidebar (session-header
+architecture button or the right-sidebar guide), and the full view can be filtered to a single session.
+All data comes from read-only side-channel observation of Cordis topology and
 tool/model/session events; it never mutates tool behaviour, sessions or user data, and keeps events in
 memory only. Install it from the community market (when listed) or with
 `dsh plugin add github:h2298511604-ops/dsh-anatomy` (`dsh plugin add dsh-anatomy` after the npm

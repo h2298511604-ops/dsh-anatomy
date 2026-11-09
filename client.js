@@ -2562,6 +2562,7 @@ window.__ModuleLoader__.load({
     const zh = {
       panel: '架构透视', title: 'DSH 架构透视 · 实时架构', stageLiveTag: '实时架构图',
       openPanel: '在右侧栏打开架构透视', fullscreen: '全屏', recentCalls: '最近调用',
+      allDomains: '全部组件域', stageThumb: '舞台（缩略）',
       firstPaintPending: '首屏计时中…', detailPaintPending: '详情计时中…',
       connConnecting: '连接中', connLive: '实时在线', connReconnecting: '重连中', connOffline: '离线',
       pause: '暂停', resume: '继续', paused: '已暂停',
@@ -2675,6 +2676,7 @@ window.__ModuleLoader__.load({
     const en = {
       panel: 'Architecture', title: 'DSH LIVE ARCHITECTURE · HUD', stageLiveTag: 'LIVE ARCHITECTURE',
       openPanel: 'Open architecture in the right sidebar', fullscreen: 'Fullscreen', recentCalls: 'Recent calls',
+      allDomains: 'All domains', stageThumb: 'Stage (thumbnail)',
       firstPaintPending: 'First paint timing…', detailPaintPending: 'Details timing…',
       connConnecting: 'Connecting', connLive: 'Live', connReconnecting: 'Reconnecting', connOffline: 'Offline',
       pause: 'Pause', resume: 'Resume', paused: 'PAUSED',
@@ -3334,8 +3336,23 @@ window.__ModuleLoader__.load({
 .da-rp-btn { height: 22px; padding: 0 7px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1, #22303e); background: rgba(20,38,54,0.6); color: var(--dsw-alias-label-primary, #dff1ff); font-family: var(--da-mono); font-size: 9.5px; cursor: pointer; }
 .da-rp-btn:hover { border-color: rgba(62,232,255,0.45); }
 .da-rp-wait { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 160px; border: 1px dashed rgba(120,190,230,0.22); border-radius: 8px; color: var(--dsw-alias-label-secondary, #8fa3b8); font-size: 11px; }
-.da-rp-stage { position: relative; flex: none; width: 100%; border: 1px solid rgba(120,190,230,0.16); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-2, #101a26); }
+.da-rp-stage { position: relative; flex: none; width: 100%; aspect-ratio: 1240 / 720; min-height: 180px; border: 1px solid rgba(120,190,230,0.16); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-2, #101a26); }
 .da-rp-stage svg { display: block; width: 100%; height: auto; }
+.da-rp-stage svg.da-stage-svg { position: static !important; inset: auto !important; width: 100% !important; height: auto !important; max-height: none; }
+.da-rp-domains { flex: none; display: flex; flex-direction: column; gap: 5px; }
+.da-rp-domains-title { font-family: var(--da-mono); font-size: 9.5px; letter-spacing: 0.08em; color: var(--dsw-alias-label-secondary, #8fa3b8); }
+.da-rp-layer { display: flex; flex-direction: column; gap: 2px; border: 1px solid rgba(120,190,230,0.10); border-radius: 6px; padding: 4px 5px; }
+.da-rp-layer-head { font-family: var(--da-mono); font-size: 8.5px; letter-spacing: 0.08em; color: rgba(126,208,255,0.6); }
+.da-rp-domain-row { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 3px 4px; border-radius: 5px; border: 1px solid transparent; cursor: pointer; }
+.da-rp-domain-row:hover { background: rgba(255,255,255,0.05); }
+.da-rp-domain-row.da-rp-domain-on { border-color: rgba(62,232,255,0.38); background: rgba(62,232,255,0.08); }
+.da-rp-domain-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; opacity: 0.9; }
+.da-rp-domain-name { flex: 1 1 auto; min-width: 0; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.da-rp-domain-counts { flex: none; font-family: var(--da-mono); font-size: 8.5px; color: var(--dsw-alias-label-secondary, #8fa3b8); }
+.da-rp-domain-rate { flex: none; font-family: var(--da-mono); font-size: 8.5px; color: rgba(62,232,255,0.85); }
+.da-rp-detail-sec { margin-top: 4px; }
+.da-rp-detail-label { font-family: var(--da-mono); font-size: 8.5px; color: var(--dsw-alias-label-secondary, #8fa3b8); letter-spacing: 0.04em; }
+.da-rp-detail-list { margin: 1px 0 0; font-size: 9.5px; color: var(--dsw-alias-label-primary, #dff1ff); overflow-wrap: anywhere; }
 .da-rp-tip { position: absolute; right: 6px; bottom: 4px; font-family: var(--da-mono); font-size: 8.5px; color: var(--dsw-alias-label-secondary, #8fa3b8); opacity: 0.8; pointer-events: none; }
 .da-rp-detail { flex: none; border: 1px solid rgba(120,190,230,0.18); border-radius: 7px; padding: 6px 8px; background: var(--dsw-alias-bg-layer-2, #101a26); font-size: 10px; }
 .da-rp-detail-head { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; }
@@ -8481,6 +8498,35 @@ window.__ModuleLoader__.load({
       return h('span', { className: 'da-tab-title' }, h(ArchitectureGlyph, { size: 13 }), t('panel'))
     }
 
+    /** Group the 14 domain views by their five layers for the compact list. */
+    function rightDomainGroups(nodes) {
+      const list = Array.isArray(nodes) ? nodes : []
+      const groups = []
+      for (let i = 0; i < LAYER_ORDER.length; i += 1) {
+        const layerId = LAYER_ORDER[i]
+        groups.push({
+          id: layerId,
+          labelKey: layerLabelKey(layerId),
+          rows: list.filter(function (node) { return node && node.layer === layerId }),
+        })
+      }
+      return groups
+    }
+
+    /** Most recent events in which a domain took part. */
+    function domainRecentEvents(events, domainId, limit) {
+      const id = String(domainId || '')
+      const list = Array.isArray(events) ? events : []
+      const cap = typeof limit === 'number' ? limit : 3
+      const out = []
+      if (!id) return out
+      for (let i = list.length - 1; i >= 0 && out.length < cap; i -= 1) {
+        const event = list[i]
+        if (event && (String(event.organ || '') === id || String(event.target || '') === id)) out.push(event)
+      }
+      return out
+    }
+
     /** Presentational compact right-sidebar panel (harness-renderable). */
     function CompactPanelView(props) {
       const t = props.t || fallbackT
@@ -8494,6 +8540,10 @@ window.__ModuleLoader__.load({
       const status = props.status && typeof props.status === 'object' ? props.status : { key: 'waiting', labelKey: 'statusWaiting' }
       const selected = props.selectedDomain ? nodes.find(function (node) { return node.id === props.selectedDomain }) : null
       const recent = events.slice(-RIGHT_RECENT_LIMIT).reverse()
+      const groups = rightDomainGroups(nodes)
+      const flowNodes = flows.nodes && typeof flows.nodes === 'object' ? flows.nodes : {}
+      const selectedEvents = selected ? domainRecentEvents(events, selected.id, 3) : []
+      const selectedExamples = selected && Array.isArray(selected.examples) ? selected.examples.slice(0, 4) : []
       const sessionTitleOf = function (id) {
         for (let i = 0; i < sessions.length; i += 1) if (sessions[i].id === id) return sessions[i].title || String(id).slice(0, 8)
         return String(id || '').slice(0, 8)
@@ -8540,7 +8590,39 @@ window.__ModuleLoader__.load({
             type: 'button', className: 'da-rp-btn', onClick: props.onFullscreen, title: t('fullscreen'),
           }, t('fullscreen')) : null
         ),
+        h('div', { className: 'da-rp-domains-title' }, t('stageThumb')),
         stage,
+        h('div', { className: 'da-rp-domains' },
+          h('div', { className: 'da-rp-domains-title' }, t('allDomains') + ' · ' + fmtNum(nodes.length)),
+          groups.map(function (group) {
+            return h('div', { className: 'da-rp-layer', key: 'rp-layer:' + group.id },
+              h('div', { className: 'da-rp-layer-head' }, t(group.labelKey)),
+              group.rows.map(function (node) {
+                const selectedRow = !!(selected && selected.id === node.id)
+                const rate = Math.round(num(flowNodes[node.id]))
+                return h('div', {
+                  key: 'rp-dom:' + node.id,
+                  className: 'da-rp-domain-row' + (selectedRow ? ' da-rp-domain-on' : ''),
+                  role: 'button',
+                  tabIndex: 0,
+                  title: domainTitle(node, zh) + ' · ' + rate + ' 次/min',
+                  onClick: function () { if (typeof props.onSelectDomain === 'function') props.onSelectDomain(node.id) },
+                  onKeyDown: function (event) {
+                    if (event && (event.key === 'Enter' || event.key === ' ')) {
+                      event.preventDefault()
+                      if (typeof props.onSelectDomain === 'function') props.onSelectDomain(node.id)
+                    }
+                  },
+                },
+                  h('span', { className: 'da-rp-domain-dot', style: { background: statusColorVar(node.status) } }),
+                  h('span', { className: 'da-rp-domain-name' }, domainTitle(node, zh)),
+                  h('span', { className: 'da-rp-domain-counts' }, String(node.plugins.length) + 'p · ' + String(node.services.length) + 's · ' + String(node.tools.length) + 't'),
+                  h('span', { className: 'da-rp-domain-rate' }, rate + ' 次/min')
+                )
+              })
+            )
+          })
+        ),
         selected ? h('div', { className: 'da-rp-detail' },
           h('div', { className: 'da-rp-detail-head' },
             h('span', null, domainTitle(selected, zh)),
@@ -8548,7 +8630,21 @@ window.__ModuleLoader__.load({
             h('span', { className: 'da-rp-spacer' }),
             h('button', { type: 'button', className: 'da-rp-btn', onClick: function () { if (typeof props.onSelectDomain === 'function') props.onSelectDomain('') } }, '×')
           ),
-          h('div', { className: 'da-rp-detail-desc' }, domainDesc(selected, zh))
+          h('div', { className: 'da-rp-detail-desc' }, domainDesc(selected, zh)),
+          h('div', { className: 'da-rp-detail-sec' },
+            h('div', { className: 'da-rp-detail-label' }, t('examples')),
+            h('div', { className: 'da-rp-detail-list' }, selectedExamples.length > 0 ? selectedExamples.join(' · ') : '—')
+          ),
+          h('div', { className: 'da-rp-detail-sec' },
+            h('div', { className: 'da-rp-detail-label' }, t('relatedEvents')),
+            selectedEvents.length === 0
+              ? h('div', { className: 'da-rp-detail-list', style: { opacity: 0.7 } }, t('recentEventsNone'))
+              : selectedEvents.map(function (event, index) {
+                  const label = event.label || (event.data && event.data.tool) || event.target || event.organ || ''
+                  return h('div', { className: 'da-rp-detail-list', key: 'rp-dom-ev:' + (event.id !== undefined ? event.id : index) },
+                    localizedKind(event.kind, t) + ' · ' + String(label) + ' · ' + fmtClock(event.t))
+                })
+          )
         ) : null,
         h('div', { className: 'da-rp-metrics' },
           h('div', { className: 'da-rp-metric' },
@@ -8847,6 +8943,8 @@ window.__ModuleLoader__.load({
         ensureAnatomyTab: ensureAnatomyTab,
         rightSidebarServices: rightSidebarServices,
         registerRightSidebarSeat: registerRightSidebarSeat,
+        rightDomainGroups: rightDomainGroups,
+        domainRecentEvents: domainRecentEvents,
         RIGHT_RETRY_MS: RIGHT_RETRY_MS,
         RIGHT_TIMEOUT_MS: RIGHT_TIMEOUT_MS,
         CompactPanelView: CompactPanelView,
