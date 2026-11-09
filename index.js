@@ -109,6 +109,10 @@ const MAX_CLIENT_BUNDLES = 200
 const MAX_MODELS = 200
 /** Organ list caps inside one OrganView. */
 const MAX_ORGAN_MEMBERS = 60
+/** v8.9 session summary: rows exposed to the client's session dropdown. */
+const MAX_SESSION_SUMMARIES = 30
+/** Upper bound on the in-memory per-session observation index. */
+const SESSION_INDEX_CAP = 200
 
 // ────────────────────────────────────────────────────────────────────────────
 // 01. Organ model — the 14 fixed organs (CONTRACT §1)
@@ -971,6 +975,9 @@ class AnatomyHub {
     this.toolMetrics = new Map() // name → {calls, errors, totalMs, minMs, maxMs}
     this.sessionToolNames = new Map() // callId → tool name (for tool/result organ routing)
     this.agents = new Map() // id → {status, startedAt, source, organ}
+    // v8.9 per-session observation index (session/event + agent lifecycle +
+    // ring supplement). Bound by SESSION_INDEX_CAP; read by collectSessions().
+    this.sessionIndex = new Map() // sessionId → {id,title,lastActivity,eventCount,agentStatus,organ,createdAt}
     this.modelSeen = new Map() // "provider::model" → {provider, model}
     this.runningTools = 0
     this.activeLlm = 0
@@ -1078,6 +1085,7 @@ class AnatomyHub {
     this.ringIndex = 0
     this.sessionThrottle.clear()
     this.sessionToolNames.clear()
+    this.sessionIndex.clear()
     this.orgSeries.clear()
     this.agents.clear()
     this.modelSeen.clear()
@@ -1544,8 +1552,8 @@ class AnatomyHub {
     }))
 
     // ── session lifecycle (counts/topology only) ──
-    this.on('session/created', this.guarded('session/created', () => this.markTopologyDirty()))
-    this.on('session/disposed', this.guarded('session/disposed', () => this.markTopologyDirty()))
+    this.on('session/created', this.guarded('session/created', session => this.sessionCreated(session)))
+    this.on('session/disposed', this.guarded('session/disposed', session => this.sessionDisposed(session)))
 
     // ── Cordis internals: cheap topology dirty marks ──
     this.on('internal/plugin', this.guarded('internal/plugin', () => this.markTopologyDirty()))
@@ -1824,6 +1832,13 @@ class AnatomyHub {
     const type = safeString(event && event.type, 80)
     if (!type) return
     const sessionId = safeString(session && session.id, 80)
+    // v8.9: keep the per-session observation index fresh for the session
+    // dropdown (lastActivity/title/eventCount), independent of the throttle.
+    try {
+      this.noteSessionActivity(sessionId, type, event)
+    } catch {
+      // session index bookkeeping is best effort
+    }
     // Track callId→toolName so tool/result routes to the right organ.
     try {
       if (type === 'tool/call' && isRecord(event.data)) {
@@ -1960,12 +1975,101 @@ class AnatomyHub {
     return record
   }
 
+  // ── 06.4b v8.9 per-session observation index ────────────────────────────
+
+  /**
+   * Update (or create) one session observation entry.
+   * @param {string} sessionId
+   * @param {{title?:string,agentStatus?:string,organ?:string,eventCount?:number,lastActivity?:number}} [patch]
+   */
+  trackSession(sessionId, patch) {
+    const id = safeString(sessionId, 120)
+    if (!id || !this.active) return
+    let entry = this.sessionIndex.get(id)
+    if (!entry) {
+      entry = { id, title: '', lastActivity: 0, eventCount: 0, agentStatus: '', organ: 'cortex', createdAt: 0 }
+      this.sessionIndex.set(id, entry)
+      if (this.sessionIndex.size > SESSION_INDEX_CAP) this.pruneSessionIndex()
+    }
+    try {
+      if (patch) {
+        if (typeof patch.title === 'string' && patch.title) entry.title = clip(patch.title, 120)
+        if (typeof patch.agentStatus === 'string' && patch.agentStatus) entry.agentStatus = clip(patch.agentStatus, 20)
+        if (typeof patch.organ === 'string' && ORGAN_BY_ID.has(patch.organ)) entry.organ = patch.organ
+        if (Number.isFinite(Number(patch.createdAt)) && Number(patch.createdAt) > 0) entry.createdAt = Math.round(Number(patch.createdAt))
+        if (Number.isFinite(Number(patch.eventCount)) && Number(patch.eventCount) > 0) entry.eventCount = Math.max(entry.eventCount, Math.round(Number(patch.eventCount)))
+        if (patch.activity === true) {
+          const now = nowMs()
+          if (now > entry.lastActivity) entry.lastActivity = now
+        } else if (Number.isFinite(Number(patch.lastActivity)) && Number(patch.lastActivity) > entry.lastActivity) {
+          entry.lastActivity = Math.round(Number(patch.lastActivity))
+        }
+      }
+    } catch {
+      // never let the index break event delivery
+    }
+    return entry
+  }
+
+  /** Drop the least-recently-active entries once the index grows too large. */
+  pruneSessionIndex() {
+    try {
+      const overflow = this.sessionIndex.size - SESSION_INDEX_CAP
+      if (overflow <= 0) return
+      const ordered = [...this.sessionIndex.values()].sort((left, right) => left.lastActivity - right.lastActivity)
+      for (let index = 0; index < overflow; index += 1) {
+        const victim = ordered[index]
+        if (victim) this.sessionIndex.delete(victim.id)
+      }
+    } catch {
+      // pruning is best effort
+    }
+  }
+
+  /** Feed one committed session event into the session index. */
+  noteSessionActivity(sessionId, type, event) {
+    if (!sessionId || !this.active) return
+    const entry = this.trackSession(sessionId, { activity: true, eventCount: 1 })
+    if (!entry) return
+    try {
+      if (type === 'session/title' && isRecord(event && event.data)) {
+        const title = safeString(event.data.title, 120)
+        if (title) entry.title = title
+      }
+    } catch {
+      // title tracking is best effort
+    }
+  }
+
+  /** session/created: register the summary row immediately. */
+  sessionCreated(session) {
+    const id = safeString(session && session.id, 120)
+    if (id) {
+      let createdAt = 0
+      try {
+        createdAt = Number(session.header && session.header.createdAt)
+      } catch {
+        createdAt = 0
+      }
+      this.trackSession(id, { agentStatus: 'idle', activity: true, createdAt })
+    }
+    this.markTopologyDirty()
+  }
+
+  /** session/disposed: keep the row (recent history) but stop claiming it is live. */
+  sessionDisposed(session) {
+    const id = safeString(session && session.id, 120)
+    if (id) this.trackSession(id, { agentStatus: 'unknown' })
+    this.markTopologyDirty()
+  }
+
   agentStatusChanged(payload) {
     const agentId = safeString(payload && payload.agent && payload.agent.id, 80)
     if (!agentId) return
     const status = safeString(payload && payload.status, 20) || 'unknown'
     const record = this.agentRecord(agentId)
     record.status = status
+    this.trackSession(agentId, { agentStatus: status, organ: record.organ, activity: true })
     this.record({
       kind: 'agent.status',
       organ: 'cortex',
@@ -1985,6 +2089,7 @@ class AnatomyHub {
     record.startedAt = nowMs()
     record.source = safeString(payload && payload.source, 40)
     record.status = 'idle'
+    this.trackSession(agentId, { agentStatus: 'idle', organ: record.organ, activity: true })
     this.markTopologyDirty()
     this.record({
       kind: 'agent.created',
@@ -1999,7 +2104,10 @@ class AnatomyHub {
 
   agentDisposed(payload) {
     const agentId = safeString(payload && payload.agent && payload.agent.id, 80)
-    if (agentId) this.agents.delete(agentId)
+    if (agentId) {
+      this.agents.delete(agentId)
+      this.trackSession(agentId, { agentStatus: 'unknown' })
+    }
     this.markTopologyDirty()
     this.record({
       kind: 'agent.disposed',
@@ -2030,6 +2138,7 @@ class AnatomyHub {
     if (id) {
       const record = this.agentRecord(id)
       record.organ = 'agents'
+      this.trackSession(id, { organ: 'agents', activity: true })
     }
     this.markTopologyDirty()
     this.record({
@@ -2441,6 +2550,204 @@ class AnatomyHub {
       }
     }
     return rows
+  }
+
+  /**
+   * v8.9 session summaries for the client's session dropdown / filter.
+   * Sources in priority order:
+   *  1. runtime session registry (`ctx.sessions.list()`): authoritative ids,
+   *     titles via `sessionTitle.get()` and the newest log event time via
+   *     `session.eventAt(seq-1)` (O(1) indexed read, no log copy);
+   *  2. this.sessionIndex: live observations from session/event + agent events;
+   *  3. the retained TraceEvent ring: sessions that already left the registry.
+   * Rows are sorted by lastActivity desc and capped at MAX_SESSION_SUMMARIES.
+   * @returns {{sessions: object[], activeSessionId: string|null}}
+   */
+  collectSessions() {
+    const merged = new Map()
+    const ensure = id => {
+      let entry = merged.get(id)
+      if (!entry) {
+        entry = {
+          id, title: '', lastActivity: 0, eventCount: 0, logLength: 0,
+          agentStatus: '', organ: 'cortex', createdAt: 0, registered: false,
+          origin: '', parentId: '', delegated: false,
+        }
+        merged.set(id, entry)
+      }
+      return entry
+    }
+    // 1) Runtime session registry (authoritative ids/titles/log activity).
+    try {
+      const service = this.getService('sessions')
+      let list = []
+      if (service && typeof service.list === 'function') {
+        const value = service.list()
+        if (Array.isArray(value)) list = value
+      }
+      const titleService = this.getService('sessionTitle')
+      for (const session of list) {
+        try {
+          const id = safeString(session && session.id, 120)
+          if (!id) continue
+          const entry = ensure(id)
+          entry.registered = true
+          let logLength = 0
+          try {
+            const seq = Number(session.seq)
+            if (Number.isFinite(seq) && seq > 0) logLength = Math.floor(seq)
+          } catch {
+            logLength = 0
+          }
+          if (logLength > entry.logLength) entry.logLength = logLength
+          try {
+            const header = session.header
+            if (isRecord(header)) {
+              const origin = safeString(header.origin, 20)
+              const parentId = safeString(header.parentSession, 120)
+              const delegationDepth = Number(header.delegationDepth)
+              if (origin === 'subagent') entry.origin = 'subagent'
+              if (parentId) entry.parentId = parentId
+              // A delegated (subagent / teammate) session is a child of a
+              // parent session; it must not be mistaken for the on-screen chat.
+              if (origin === 'subagent' || parentId || (Number.isFinite(delegationDepth) && delegationDepth > 0)) {
+                entry.delegated = true
+              }
+            }
+          } catch {
+            // header may be unavailable on a detached session
+          }
+          try {
+            const createdAt = Number(session.header && session.header.createdAt)
+            if (Number.isFinite(createdAt) && createdAt > entry.createdAt) entry.createdAt = Math.round(createdAt)
+          } catch {
+            // header is optional
+          }
+          try {
+            if (logLength > 0 && typeof session.eventAt === 'function') {
+              const newest = session.eventAt(logLength - 1)
+              const time = Number(newest && newest.time)
+              if (Number.isFinite(time) && time > entry.lastActivity) entry.lastActivity = Math.round(time)
+            }
+          } catch {
+            // indexed read is optional
+          }
+          try {
+            if (titleService && typeof titleService.get === 'function') {
+              const titleSnapshot = titleService.get(session)
+              const title = safeString(titleSnapshot && titleSnapshot.title, 120)
+              if (title) entry.title = title
+            }
+          } catch {
+            // title fold is optional
+          }
+        } catch {
+          // skip one malformed session
+        }
+      }
+    } catch (error) {
+      this.warn('sessions.list() failed', error)
+    }
+    // 2) Live observations collected by the session/event + agent listeners.
+    try {
+      for (const [id, observed] of this.sessionIndex) {
+        const entry = ensure(id)
+        if (!entry.title && observed.title) entry.title = observed.title
+        if (observed.lastActivity > entry.lastActivity) entry.lastActivity = observed.lastActivity
+        if ((observed.eventCount || 0) > entry.eventCount) entry.eventCount = observed.eventCount
+        if (!entry.agentStatus && observed.agentStatus) entry.agentStatus = observed.agentStatus
+        if (observed.organ) {
+          entry.organ = observed.organ
+          if (observed.organ === 'agents') entry.delegated = true
+        }
+        if ((observed.createdAt || 0) > entry.createdAt) entry.createdAt = observed.createdAt
+      }
+    } catch {
+      // degrade to registry-only rows
+    }
+    // 3) Ring supplement: sessions still visible in the retained event window.
+    try {
+      const ringCounts = new Map()
+      for (let offset = 0; offset < this.ringCount; offset += 1) {
+        const index = (this.ringIndex - this.ringCount + offset + RING_CAPACITY * 2) % RING_CAPACITY
+        const event = this.ring[index]
+        const sessionId = safeString(event && event.sessionId, 120)
+        if (!sessionId) continue
+        let ringEntry = ringCounts.get(sessionId)
+        if (!ringEntry) {
+          ringEntry = { lastActivity: 0, count: 0 }
+          ringCounts.set(sessionId, ringEntry)
+        }
+        ringEntry.count += 1
+        const time = Number(event.t)
+        if (Number.isFinite(time) && time > ringEntry.lastActivity) ringEntry.lastActivity = time
+      }
+      for (const [id, ringEntry] of ringCounts) {
+        const entry = ensure(id)
+        if (ringEntry.lastActivity > entry.lastActivity) entry.lastActivity = ringEntry.lastActivity
+        if (entry.eventCount === 0) entry.eventCount = ringEntry.count
+      }
+    } catch {
+      // ring supplement is best effort
+    }
+    // Assemble and rank rows.
+    const rows = []
+    const delegatedIds = new Set()
+    for (const entry of merged.values()) {
+      const agentRecord = this.agents.get(entry.id)
+      let status = 'unknown'
+      if (agentRecord && agentRecord.status === 'running') status = 'running'
+      else if (agentRecord && agentRecord.status === 'idle') status = 'idle'
+      else if (entry.agentStatus === 'running' || entry.agentStatus === 'idle') status = entry.agentStatus
+      else if (entry.registered) status = 'idle'
+      const fallbackTitle = entry.id.length > 8 ? entry.id.slice(0, 8) : entry.id
+      const title = safeString(entry.title, 120) || fallbackTitle || '未命名会话'
+      const row = {
+        id: entry.id,
+        title,
+        status,
+        lastActivity: Math.max(0, Math.round(entry.lastActivity || 0)),
+      }
+      if (entry.eventCount > 0) row.eventCount = Math.round(entry.eventCount)
+      if (entry.logLength > 0) row.logLength = Math.round(entry.logLength)
+      if (entry.organ === 'agents') row.organ = 'agents'
+      // Optional navigation metadata: lets the client filter delegated
+      // (subagent / teammate) sessions out of the main dropdown.
+      if (entry.origin === 'subagent') row.origin = 'subagent'
+      if (entry.parentId) row.parentId = entry.parentId
+      if (entry.delegated || entry.origin === 'subagent' || entry.parentId) delegatedIds.add(entry.id)
+      rows.push(row)
+    }
+    rows.sort((left, right) => (right.lastActivity - left.lastActivity) || left.id.localeCompare(right.id))
+    const sessions = rows.slice(0, MAX_SESSION_SUMMARIES)
+    // Heuristic "active" session: only a RUNNING, non-delegated session whose
+    // id has the store-minted `session-…` shape is reported. Delegated children
+    // (subagent/teammate) and externally supplied raw ids are excluded, so a
+    // running teammate can never masquerade as the on-screen chat session; when
+    // nothing confidently qualifies the field is simply omitted.
+    let activeSessionId = null
+    const runningRows = sessions.filter(row => row.status === 'running' && !delegatedIds.has(row.id))
+    const preferred = runningRows.find(row => /^session-/i.test(row.id))
+    if (preferred) activeSessionId = preferred.id
+    return { sessions, activeSessionId }
+  }
+
+  /** Lite projection of collectSessions(): no eventCount/logLength/organ extras. */
+  liteSessionSummary() {
+    try {
+      const result = this.collectSessions()
+      return {
+        sessions: result.sessions.map(row => ({
+          id: row.id,
+          title: row.title,
+          status: row.status,
+          lastActivity: row.lastActivity,
+        })),
+        activeSessionId: result.activeSessionId,
+      }
+    } catch {
+      return { sessions: [], activeSessionId: null }
+    }
   }
 
   /** @returns {AgentView[]} */
@@ -3172,10 +3479,28 @@ class AnatomyHub {
     const cached = this.snapshotCache.value
     let counts
     let organs
+    let sessionSummary
     if (cached && isRecord(cached) && Array.isArray(cached.organs)) {
       counts = this.liteCountsFromFull(cached)
       organs = cached.organs.map(organ => this.liteOrganFromFull(organ))
+      // Remap the cached full session rows into the light lite vocabulary.
+      sessionSummary = Array.isArray(cached.sessions)
+        ? {
+            sessions: cached.sessions.slice(0, MAX_SESSION_SUMMARIES).map(row => {
+              const id = safeString(row && row.id, 120)
+              const fallback = id.length > 8 ? id.slice(0, 8) : id
+              return {
+                id,
+                title: safeString(row && row.title, 120) || fallback || '未命名会话',
+                status: safeString(row && row.status, 20) || 'unknown',
+                lastActivity: Math.max(0, Math.round(Number(row && row.lastActivity) || 0)),
+              }
+            }),
+            activeSessionId: safeString(cached.activeSessionId, 120) || null,
+          }
+        : this.liteSessionSummary()
     } else {
+      sessionSummary = this.liteSessionSummary()
       counts = {
         plugins: 0,
         pluginsActive: 0,
@@ -3226,7 +3551,7 @@ class AnatomyHub {
           services: inventories.services.length,
           tools: inventories.tools.length,
           agents: inventories.agents.length,
-          sessions: this.countSessions(),
+          sessions: Math.max(this.countSessions(), sessionSummary.sessions.length),
           eventsTotal: this.eventsTotal,
           organs: ORGAN_DEFS.length,
         }
@@ -3250,6 +3575,9 @@ class AnatomyHub {
       seq: this.seq,
       counts,
       organs,
+      // v8.9: the first paint also needs the session dropdown.
+      sessions: sessionSummary.sessions,
+      ...(sessionSummary.activeSessionId ? { activeSessionId: sessionSummary.activeSessionId } : {}),
     }
     this.lastLiteBuildMs = Math.max(0, nowMs() - startedAt)
     return lite
@@ -3394,11 +3722,17 @@ class AnatomyHub {
     } catch (error) {
       this.warn('tool metrics failed', error)
     }
-    let sessions = 0
+    let sessionCount = 0
     try {
-      sessions = this.countSessions()
+      sessionCount = this.countSessions()
     } catch {
-      sessions = 0
+      sessionCount = 0
+    }
+    let sessionSummary = { sessions: [], activeSessionId: null }
+    try {
+      sessionSummary = this.collectSessions()
+    } catch (error) {
+      this.warn('session summary collection failed', error)
     }
     const snapshot = {
       ok: true,
@@ -3414,6 +3748,10 @@ class AnatomyHub {
       models,
       bundles,
       clientBundles,
+      // v8.9 per-session summaries for the client's dropdown/filter. Optional
+      // extras (eventCount/logLength/organ) appear only when known.
+      sessions: sessionSummary.sessions,
+      ...(sessionSummary.activeSessionId ? { activeSessionId: sessionSummary.activeSessionId } : {}),
       topology,
       counts: {
         plugins: plugins.length,
@@ -3422,7 +3760,7 @@ class AnatomyHub {
         services: services.length,
         tools: tools.length,
         agents: agents.length,
-        sessions,
+        sessions: Math.max(sessionCount, sessionSummary.sessions.length),
         eventsTotal: this.eventsTotal,
         organs: ORGAN_DEFS.length,
       },

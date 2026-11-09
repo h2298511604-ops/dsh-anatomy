@@ -687,6 +687,132 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** Cubic between two explicitly chosen anchor sides (0.5 ratio, 40–160). */
+    function sidedEdgeRoute(start, startSide, end, endSide) {
+      const dx = num(end.x) - num(start.x)
+      const dy = num(end.y) - num(start.y)
+      const horizontal = (startSide === 'left' || startSide === 'right') && (endSide === 'left' || endSide === 'right')
+      const vertical = (startSide === 'top' || startSide === 'bottom') && (endSide === 'top' || endSide === 'bottom')
+      const axis = horizontal ? Math.abs(dx) : (vertical ? Math.abs(dy) : Math.max(Math.abs(dx), Math.abs(dy)) * 0.75)
+      const distance = clamp(axis * 0.5, 40, 160)
+      const outStart = sideOutwardVector(startSide)
+      const outEnd = sideOutwardVector(endSide)
+      return routeFromControls({
+        x1: num(start.x), y1: num(start.y),
+        c1x: round1(num(start.x) + outStart.x * distance), c1y: round1(num(start.y) + outStart.y * distance),
+        c2x: round1(num(end.x) + outEnd.x * distance), c2y: round1(num(end.y) + outEnd.y * distance),
+        x2: num(end.x), y2: num(end.y),
+      })
+    }
+
+    /** Intersection length + minimum card clearance + path length for scoring. */
+    function edgeObstacleStats(route, rects) {
+      const points = pathPoints(route)
+      const list = Array.isArray(rects) ? rects : []
+      const length = routeLength(route)
+      if (points.length < 2 || list.length === 0) return { intersectLength: 0, minGap: Infinity, length: length }
+      const spacing = length / (points.length - 1)
+      let intersectLength = 0
+      let minGap = Infinity
+      for (let i = 0; i < points.length; i += 1) {
+        const point = points[i]
+        let inside = false
+        for (let r = 0; r < list.length; r += 1) {
+          const rect = list[r]
+          if (point.x > rect.x1 && point.x < rect.x2 && point.y > rect.y1 && point.y < rect.y2) {
+            inside = true
+            break
+          }
+          const gapX = point.x < rect.x1 ? rect.x1 - point.x : (point.x > rect.x2 ? point.x - rect.x2 : 0)
+          const gapY = point.y < rect.y1 ? rect.y1 - point.y : (point.y > rect.y2 ? point.y - rect.y2 : 0)
+          const gap = Math.hypot(gapX, gapY)
+          if (gap < minGap) minGap = gap
+        }
+        if (inside) {
+          intersectLength += spacing
+          minGap = 0
+        }
+      }
+      return { intersectLength: round1(intersectLength), minGap: minGap === Infinity ? Infinity : round1(minGap), length: round1(length) }
+    }
+
+    /** Candidate curves for local avoidance (baseline + side swaps + normal offsets). */
+    function edgeAvoidanceCandidates(start, end, rects) {
+      const obstacles = Array.isArray(rects) ? rects : []
+      const baseline = simpleEdgeRoute(start, end)
+      const dx = num(end.x) - num(start.x)
+      const dy = num(end.y) - num(start.y)
+      const horizontal = Math.abs(dx) >= Math.abs(dy)
+      const primaryStart = horizontal ? (dx >= 0 ? 'right' : 'left') : (dy >= 0 ? 'bottom' : 'top')
+      const primaryEnd = horizontal ? (dx >= 0 ? 'left' : 'right') : (dy >= 0 ? 'top' : 'bottom')
+      const pairs = horizontal
+        ? [[primaryStart, primaryEnd], ['right', 'left'], ['right', 'top'], ['bottom', 'left']]
+        : [[primaryStart, primaryEnd], ['bottom', 'top'], ['bottom', 'right'], ['left', 'top']]
+      const candidates = [baseline]
+      const seen = Object.create(null)
+      seen[primaryStart + '>' + primaryEnd] = true
+      for (let i = 0; i < pairs.length; i += 1) {
+        const key = pairs[i][0] + '>' + pairs[i][1]
+        if (seen[key]) continue
+        seen[key] = true
+        candidates.push(sidedEdgeRoute(start, pairs[i][0], end, pairs[i][1]))
+        if (candidates.length >= 4) break
+      }
+      const length = Math.hypot(dx, dy) || 1
+      const nx = -dy / length
+      const ny = dx / length
+      const base = baseline.controls
+      const offsets = [20, -20, 35, -35, 55, -55, 75, -75]
+      for (let i = 0; i < offsets.length && candidates.length < 12; i += 1) {
+        const offset = offsets[i]
+        candidates.push(routeFromControls({
+          x1: base.x1, y1: base.y1,
+          c1x: round1(base.c1x + nx * offset), c1y: round1(base.c1y + ny * offset),
+          c2x: round1(base.c2x + nx * offset), c2y: round1(base.c2y + ny * offset),
+          x2: base.x2, y2: base.y2,
+        }))
+      }
+      return candidates.slice(0, 12)
+    }
+
+    /** Pick a natural cubic with local avoidance; never falls back to gutter lanes. */
+    function lightEdgeRoute(start, end, rects) {
+      const obstacles = Array.isArray(rects) ? rects : []
+      if (obstacles.length === 0) return simpleEdgeRoute(start, end)
+      const candidates = edgeAvoidanceCandidates(start, end, obstacles)
+      let best = candidates[0]
+      let bestScore = Infinity
+      let bestClear = null
+      let bestClearGap = -Infinity
+      for (let i = 0; i < candidates.length; i += 1) {
+        const stats = edgeObstacleStats(candidates[i], obstacles)
+        if (stats.intersectLength === 0 && stats.minGap >= 8) {
+          const score = stats.length * 0.02 - Math.min(8, stats.minGap) * 0.5
+          if (score < bestScore - 1e-6) {
+            bestScore = score
+            best = candidates[i]
+            bestClear = candidates[i]
+            bestClearGap = stats.minGap
+          }
+        }
+      }
+      if (bestClear) return bestClear
+      // No fully clear candidate: keep the fewest-intersections option.
+      let least = candidates[0]
+      let leastIntersect = Infinity
+      let leastLength = Infinity
+      for (let i = 0; i < candidates.length; i += 1) {
+        const stats = edgeObstacleStats(candidates[i], obstacles)
+        if (stats.intersectLength < leastIntersect - 1e-6
+          || (Math.abs(stats.intersectLength - leastIntersect) < 1e-6 && stats.length < leastLength)) {
+          least = candidates[i]
+          leastIntersect = stats.intersectLength
+          leastLength = stats.length
+        }
+      }
+      return least
+    }
+
     /** Filter events down to one session ('' / missing id = all sessions). */
     function filterEventsBySession(events, sessionId) {
       const list = Array.isArray(events) ? events : []
@@ -822,6 +948,80 @@ window.__ModuleLoader__.load({
       }
       try { right.openTab(wantedKind) } catch (error) { return false }
       return true
+    }
+
+    const RIGHT_RETRY_MS = 400
+    const RIGHT_TIMEOUT_MS = 60000
+
+    /** Resolve both optional right-sidebar services, or null when not ready. */
+    function rightSidebarServices(ctx) {
+      return safe(function () {
+        if (!ctx || typeof ctx.get !== 'function') return null
+        const tabs = ctx.get('sidebarRightTabs')
+        const right = ctx.get('sidebarRight')
+        if (tabs && typeof tabs.register === 'function' && right && typeof right.openTab === 'function') {
+          return { tabs: tabs, right: right }
+        }
+        return null
+      }, null)
+    }
+
+    /**
+     * Idempotently register the tab type, body/title slots and header.utilities
+     * entry. Returns true once registered, false while services are unavailable.
+     */
+    function registerRightSidebarSeat(ctx, t, anatomyTheme, state) {
+      const seat = rightSidebarServices(ctx)
+      if (!seat || !state || typeof state !== 'object') return false
+      if (state.registered) return true
+      const disposers = Array.isArray(state.disposers) ? state.disposers : []
+      state.disposers = disposers
+      const push = function (disposer) {
+        if (typeof disposer === 'function') disposers.push(disposer)
+      }
+      try {
+        state.registered = true
+        push(seat.tabs.register({
+          id: ANATOMY_TAB_ID,
+          kind: ANATOMY_TAB_KIND,
+          keepMounted: true,
+          title: function () { return t('panel') },
+          guide: [{ id: 'anatomy', order: 20, title: function () { return t('panel') } }],
+        }))
+        push(ctx.slots.inject('sidebar.right.pane.tab', function () {
+          return ctx.slots.register({
+            name: 'sidebar.right.pane.tab',
+            key: ANATOMY_TAB_ID,
+            locale: NS,
+            inject: function () { return { t: t, anatomyTheme: anatomyTheme, sidebarRight: seat.right } },
+          }, RightPanel)
+        }))
+        push(ctx.slots.inject('sidebar.right.pane.tab.title', function () {
+          return ctx.slots.register({
+            name: 'sidebar.right.pane.tab.title',
+            key: ANATOMY_TAB_ID,
+            locale: NS,
+            inject: function () { return { t: t } },
+          }, AnatomyTabTitle)
+        }))
+        push(ctx.slots.inject('conversation.session.header.utilities', function () {
+          return ctx.slots.register({
+            name: 'conversation.session.header.utilities',
+            id: 'dsh-anatomy:open',
+            order: 20,
+            registrant: 'dsh-anatomy',
+            inject: function () { return { t: t, sidebarRight: seat.right } },
+          }, OpenButton)
+        }))
+        return true
+      } catch (error) {
+        state.registered = false
+        for (let i = disposers.length - 1; i >= 0; i -= 1) {
+          try { disposers[i]() } catch (disposeError) { /* ignore */ }
+        }
+        disposers.length = 0
+        return false
+      }
     }
 
     function readThemeColors() {
@@ -2362,6 +2562,7 @@ window.__ModuleLoader__.load({
     const zh = {
       panel: '架构透视', title: 'DSH 架构透视 · 实时架构', stageLiveTag: '实时架构图',
       openPanel: '在右侧栏打开架构透视', fullscreen: '全屏', recentCalls: '最近调用',
+      firstPaintPending: '首屏计时中…', detailPaintPending: '详情计时中…',
       connConnecting: '连接中', connLive: '实时在线', connReconnecting: '重连中', connOffline: '离线',
       pause: '暂停', resume: '继续', paused: '已暂停',
       events: '事件', totalEvents: '累计事件', domains: '组件域', components: '组件',
@@ -2474,6 +2675,7 @@ window.__ModuleLoader__.load({
     const en = {
       panel: 'Architecture', title: 'DSH LIVE ARCHITECTURE · HUD', stageLiveTag: 'LIVE ARCHITECTURE',
       openPanel: 'Open architecture in the right sidebar', fullscreen: 'Fullscreen', recentCalls: 'Recent calls',
+      firstPaintPending: 'First paint timing…', detailPaintPending: 'Details timing…',
       connConnecting: 'Connecting', connLive: 'Live', connReconnecting: 'Reconnecting', connOffline: 'Offline',
       pause: 'Pause', resume: 'Resume', paused: 'PAUSED',
       events: 'Events', totalEvents: 'Total events', domains: 'Domains', components: 'Components',
@@ -3042,6 +3244,7 @@ window.__ModuleLoader__.load({
 .da-hud-tr { align-items: flex-end; text-align: right; }
 .da-hud-line { font-family: var(--da-mono); font-size: 9.5px; color: rgba(196,232,250,0.82); }
 .da-hud-hint { margin-top: 2px; font-family: var(--da-mono); font-size: 9px; color: rgba(160,205,230,0.72); max-width: 240px; }
+.da-hud-timing { margin-top: 3px; font-family: var(--da-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em; color: rgba(225,248,255,0.95); text-shadow: 0 0 6px rgba(62,232,255,0.25); white-space: nowrap; }
 .da-status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(120,200,240,0.28); background: rgba(6,15,23,0.7); font-family: var(--da-mono); font-size: 9.5px; letter-spacing: 0.04em; }
 .da-status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: rgba(140,160,175,0.8); }
 .da-status-live { color: #9ff0c4; border-color: rgba(61,220,151,0.45); }
@@ -4396,13 +4599,13 @@ window.__ModuleLoader__.load({
       }
       const subtitle = subtitleParts.length > 0 ? subtitleParts.join(' · ') : t('waitingSnapshot')
       return h('div', { className: 'da-header' },
-        h('div', { className: 'da-brand' },
+          h('div', { className: 'da-brand' },
           h('span', { className: 'da-logo' }, h(PanelGlyph, { size: 20, active: true })),
           h('div', { className: 'da-titles' },
-            h('div', { className: 'da-title' },
+            h('div', { className: 'da-title', title: props.paintLabel || '' },
               h('span', null, t('title'))
             ),
-            h('div', { className: 'da-sub', title: subtitle }, subtitle)
+            h('div', { className: 'da-sub', title: subtitle + (props.paintLabel ? ' · ' + props.paintLabel : '') }, subtitle)
           )
         ),
         h(ViewSwitch, { t: t, view: props.view, onView: props.onView }),
@@ -4798,7 +5001,8 @@ window.__ModuleLoader__.load({
         const toStagger = (!bidirectional && sideCounts[toBucket] > 1) ? (((toIndex % 2) * 2 - 1) * 8) : 0
         const start = sideAnchor(def.fromNode, def.fromSide, clampSideOffset(def.fromSide, (fromOffsets[fromIndex] || 0) * spreadScale + lane + fromStagger))
         const end = sideAnchor(def.toNode, def.toSide, clampSideOffset(def.toSide, (toOffsets[toIndex] || 0) * spreadScale + lane + toStagger))
-        const route = simpleEdgeRoute(start, end)
+        const obstacles = buildObstacles(nodes, 12, [row.from, row.to])
+        const route = lightEdgeRoute(start, end, obstacles)
         const count = num(row.count)
         drawable.push({
           def: def, row: row, route: route, count: count,
@@ -5944,9 +6148,13 @@ window.__ModuleLoader__.load({
               fmtNum(props.eventCount || 0) + ' ' + t('hudRecent') + ' · ' + fmtNum(activeLinks) + ' ' + t('hudLinks')),
             h('div', { className: 'da-hud-line' },
               t('statusLastEvent') + '：' + lastEventLabel),
-            formatPaintTimings(props.firstFrameMs, props.detailMs, t)
-              ? h('div', { className: 'da-hud-line' }, formatPaintTimings(props.firstFrameMs, props.detailMs, t))
-              : null,
+            (() => {
+              const measured = formatPaintTimings(props.firstFrameMs, props.detailMs, t)
+              const text = measured && num(props.detailMs) <= 0
+                ? measured + ' · ' + t('detailPaintPending')
+                : (measured || t('firstPaintPending'))
+              return h('div', { className: 'da-hud-timing' }, text)
+            })(),
             props.snapshotLite
               ? h('div', { className: 'da-hud-hint' }, t('statusLoadingDetails'))
               : (emptyTraffic
@@ -8135,6 +8343,7 @@ window.__ModuleLoader__.load({
         h('style', null, CSS_TEXT),
         h(Header, {
           t: t, conn: conn, paused: paused, runtime: runtime, eventCount: filteredEvents.length,
+          paintLabel: formatPaintTimings(firstFrameMs, detailMs, t) || t('firstPaintPending'),
           railCollapsed: railCollapsed, drawerCollapsed: drawerCollapsed,
           view: view, onView: setViewMode, helpOpen: helpOpen, onHelp: toggleHelp,
           onTogglePause: togglePause,
@@ -8549,61 +8758,55 @@ window.__ModuleLoader__.load({
         inject: () => ({ t, anatomyTheme }),
       }, AnatomyPage))
 
-      // 3) Optional conversation right-sidebar tab. Both services must exist;
-      //    they are never added to `inject` so older hosts keep working.
-      const sidebarRightTabs = safe(function () {
-        return typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : null
-      }, null)
-      const sidebarRight = safe(function () {
-        return typeof ctx.get === 'function' ? ctx.get('sidebarRight') : null
-      }, null)
-      const canUseRightSidebar = !!(sidebarRightTabs && typeof sidebarRightTabs.register === 'function'
-        && sidebarRight && typeof sidebarRight.openTab === 'function')
-      if (canUseRightSidebar) {
-        ctx.effect(function registerAnatomyTabType() {
-          try {
-            return sidebarRightTabs.register({
-              id: ANATOMY_TAB_ID,
-              kind: ANATOMY_TAB_KIND,
-              keepMounted: true,
-              title: function () { return t('panel') },
-            })
-          } catch (error) {
-            return function () {}
+      // 3) Optional conversation right-sidebar tab. The services can mount after
+      //    this plugin, so retry in one ctx.effect until they are ready.
+      ctx.effect(function lazyRightSidebarSeat() {
+        const state = {
+          registered: false,
+          disposers: [],
+          disposed: false,
+          timer: 0,
+          startedAt: Date.now(),
+          warned: false,
+        }
+        const stopTimer = function () {
+          if (state.timer) {
+            clearInterval(state.timer)
+            state.timer = 0
           }
-        }, 'dsh-anatomy: right tab type')
-        ctx.effect(function registerAnatomyTabBody() {
-          return ctx.slots.inject('sidebar.right.pane.tab', function () {
-            return ctx.slots.register({
-              name: 'sidebar.right.pane.tab',
-              key: ANATOMY_TAB_ID,
-              locale: NS,
-              inject: function () { return { t: t, anatomyTheme: anatomyTheme, sidebarRight: sidebarRight } },
-            }, RightPanel)
-          })
-        }, 'dsh-anatomy: right tab body')
-        ctx.effect(function registerAnatomyTabTitle() {
-          return ctx.slots.inject('sidebar.right.pane.tab.title', function () {
-            return ctx.slots.register({
-              name: 'sidebar.right.pane.tab.title',
-              key: ANATOMY_TAB_ID,
-              locale: NS,
-              inject: function () { return { t: t } },
-            }, AnatomyTabTitle)
-          })
-        }, 'dsh-anatomy: right tab title')
-        ctx.effect(function registerAnatomyOpenButton() {
-          return ctx.slots.inject('conversation.session.header.corner', function () {
-            return ctx.slots.register({
-              name: 'conversation.session.header.corner',
-              id: 'dsh-anatomy:open',
-              order: 20,
-              registrant: 'dsh-anatomy',
-              inject: function () { return { t: t, sidebarRight: sidebarRight } },
-            }, OpenButton)
-          })
-        }, 'dsh-anatomy: header open button')
-      }
+        }
+        const attempt = function () {
+          if (state.disposed || state.registered) return
+          const ok = safe(function () {
+            return registerRightSidebarSeat(ctx, t, anatomyTheme, state)
+          }, false)
+          if (ok) {
+            stopTimer()
+            return
+          }
+          if (!state.warned && Date.now() - state.startedAt >= RIGHT_TIMEOUT_MS) {
+            state.warned = true
+            stopTimer()
+            if (typeof console !== 'undefined' && console.warn) {
+              console.warn('[dsh-anatomy] right-sidebar services unavailable after ' + RIGHT_TIMEOUT_MS + 'ms')
+            }
+          }
+        }
+        attempt()
+        if (!state.registered && !state.disposed) {
+          state.timer = setInterval(attempt, RIGHT_RETRY_MS)
+          // Never keep a Node test process alive because of the retry timer.
+          if (state.timer && typeof state.timer.unref === 'function') state.timer.unref()
+        }
+        return function () {
+          state.disposed = true
+          stopTimer()
+          for (let i = state.disposers.length - 1; i >= 0; i -= 1) {
+            try { state.disposers[i]() } catch (error) { /* ignore */ }
+          }
+          state.disposers.length = 0
+        }
+      }, 'dsh-anatomy: right sidebar seat (lazy)')
     }
 
 
@@ -8642,6 +8845,10 @@ window.__ModuleLoader__.load({
         rightMountedSessionId: rightMountedSessionId,
         hasOpenAnatomyTab: hasOpenAnatomyTab,
         ensureAnatomyTab: ensureAnatomyTab,
+        rightSidebarServices: rightSidebarServices,
+        registerRightSidebarSeat: registerRightSidebarSeat,
+        RIGHT_RETRY_MS: RIGHT_RETRY_MS,
+        RIGHT_TIMEOUT_MS: RIGHT_TIMEOUT_MS,
         CompactPanelView: CompactPanelView,
         RightPanel: RightPanel,
         OpenButton: OpenButton,
@@ -8673,6 +8880,10 @@ window.__ModuleLoader__.load({
         gutterBetween: gutterBetween,
         pickTopTools: pickTopTools,
         simpleEdgeRoute: simpleEdgeRoute,
+        sidedEdgeRoute: sidedEdgeRoute,
+        edgeObstacleStats: edgeObstacleStats,
+        edgeAvoidanceCandidates: edgeAvoidanceCandidates,
+        lightEdgeRoute: lightEdgeRoute,
         filterEventsBySession: filterEventsBySession,
         deriveSessions: deriveSessions,
         deriveSessionMetrics: deriveSessionMetrics,
