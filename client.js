@@ -602,6 +602,69 @@ window.__ModuleLoader__.load({
       return view === 'tools' ? t('backTools') : t('backDomains')
     }
 
+    /** Activity window for "running" (ms since the last observed event). */
+    const RUNNING_WINDOW_MS = 15000
+
+    /**
+     * Runtime status precedence: waiting data → paused → offline/reconnecting →
+     * running (last event within 15s) → idle but connected.
+     */
+    function deriveRuntimeStatus(input) {
+      const state = input && typeof input === 'object' ? input : {}
+      const now = num(state.now) || Date.now()
+      const lastEventAt = num(state.lastEventAt)
+      if (!state.snapshot) {
+        return { key: 'waiting', labelKey: 'statusWaiting', running: false, active: false }
+      }
+      if (state.paused === true) {
+        return { key: 'paused', labelKey: 'statusPaused', running: false, active: false }
+      }
+      if (state.conn !== undefined && state.conn !== 'live') {
+        const reconnecting = state.conn === 'reconnecting' || state.conn === 'connecting'
+        return {
+          key: reconnecting ? 'reconnecting' : 'offline',
+          labelKey: reconnecting ? 'statusReconnecting' : 'statusOffline',
+          running: false,
+          active: false,
+        }
+      }
+      const active = lastEventAt > 0 && now - lastEventAt <= RUNNING_WINDOW_MS
+      return active
+        ? { key: 'running', labelKey: 'statusRunning', running: true, active: true }
+        : { key: 'idleConnected', labelKey: 'statusIdleConnected', running: false, active: false }
+    }
+
+    /** Human label for "last event x seconds ago". */
+    function formatLastEventLabel(lastEventAt, now, t) {
+      const stamp = num(lastEventAt)
+      const current = num(now) || Date.now()
+      if (!stamp) return t('statusNoEvents')
+      const elapsed = Math.max(0, current - stamp)
+      if (elapsed < 1000) return t('justNowShort')
+      const seconds = Math.round(elapsed / 1000)
+      return seconds + t('secondsAgo')
+    }
+
+    /**
+     * Merge snapshot frames. A full snapshot wins over later lite frames; lite
+     * frames only replace older lite frames (seq/generatedAt ordering).
+     */
+    function applySnapshotState(previous, incoming) {
+      const prev = previous && typeof previous === 'object'
+        ? previous
+        : { snapshot: null, fullSnapshot: false, lite: false }
+      if (!incoming || typeof incoming !== 'object') return { state: prev, changed: false }
+      const lite = incoming.lite === true
+      if (prev.fullSnapshot && lite) return { state: prev, changed: false }
+      if (lite) {
+        const prevSeq = num(prev.snapshot && prev.snapshot.seq)
+        const nextSeq = num(incoming.seq)
+        if (prev.lite && prevSeq > 0 && nextSeq > 0 && nextSeq < prevSeq) return { state: prev, changed: false }
+        return { state: { snapshot: incoming, fullSnapshot: false, lite: true }, changed: true }
+      }
+      return { state: { snapshot: incoming, fullSnapshot: true, lite: false }, changed: true }
+    }
+
     function readThemeColors() {
       const read = (name, fallback) => {
         const value = safe(() => {
@@ -2200,7 +2263,7 @@ window.__ModuleLoader__.load({
       edgeDetail: '调用关系详情', edgeFrom: '起点', edgeTo: '终点', edgeCount: '次数 · 近 120s',
       edgeErrors: '错误数', edgeAvgMs: '平均耗时', edgeSources: '按来源明细', edgeKinds: '按类型明细',
       edgeSamples: '最近样本', filterInLog: '在调用日志中过滤', goFrom: '查看起点域', goTo: '查看终点域',
-      emptyTraffic: '暂无调用 · 运行中会在这里流动', windowTag: '近 120s',
+      emptyTraffic: '暂无调用 · 有调用时会在这里流动', windowTag: '近 120s',
       zoomIn: '放大', zoomOut: '缩小', zoomReset: '重置视图', zoomFocus: '聚焦选中项', zoomFocusShort: '聚焦', zoomLabel: '缩放',
       legendHide: '收起图例', upstreamDownstream: '上下游', upstream: '上游 · 入边', downstream: '下游 · 出边',
       noUpstream: '近 120s 无入边', noDownstream: '近 120s 无出边', topSources: '主要来源 / 工具',
@@ -2240,6 +2303,9 @@ window.__ModuleLoader__.load({
       toolZhTitle: '中文说明', autoParsed: '（自动解析名称，暂无内置中文说明）',
       expandEnglish: '展开英文原文', collapseEnglish: '收起英文原文', originalText: '英文原文',
       statusRunning: '运行中', statusIdle: '空闲', statusWaiting: '等待数据',
+      statusIdleConnected: '已连接 · 空闲', statusPaused: '已暂停', statusOffline: '离线', statusReconnecting: '重连中',
+      statusLoadingDetails: '加载详情…', statusLastEvent: '最近事件', statusNoEvents: '暂无事件',
+      secondsAgo: '秒前', justNowShort: '刚刚', connectingDataStream: '正在连接 Host 数据流…',
       hudRecent: '近 120s 事件', hudLinks: '活跃链路',
     }
 
@@ -2306,7 +2372,7 @@ window.__ModuleLoader__.load({
       edgeDetail: 'Call relation detail', edgeFrom: 'From', edgeTo: 'To', edgeCount: 'Count · last 120s',
       edgeErrors: 'Errors', edgeAvgMs: 'Avg latency', edgeSources: 'Sources', edgeKinds: 'Event kinds',
       edgeSamples: 'Recent samples', filterInLog: 'Filter call log', goFrom: 'View source domain', goTo: 'View target domain',
-      emptyTraffic: 'No calls observed yet · traffic will flow here while running', windowTag: 'last 120s',
+      emptyTraffic: 'No calls yet · calls will flow here while running', windowTag: 'last 120s',
       zoomIn: 'Zoom in', zoomOut: 'Zoom out', zoomReset: 'Reset view', zoomFocus: 'Focus selection', zoomFocusShort: 'Focus', zoomLabel: 'Zoom',
       legendHide: 'Collapse legend', upstreamDownstream: 'Upstream / downstream', upstream: 'Upstream · inbound', downstream: 'Downstream · outbound',
       noUpstream: 'No inbound edges in the last 120s', noDownstream: 'No outbound edges in the last 120s', topSources: 'Top sources / tools',
@@ -2346,6 +2412,9 @@ window.__ModuleLoader__.load({
       toolZhTitle: 'Chinese summary', autoParsed: '(auto-parsed name, no built-in Chinese summary)',
       expandEnglish: 'Show English original', collapseEnglish: 'Hide English original', originalText: 'English original',
       statusRunning: 'running', statusIdle: 'idle', statusWaiting: 'waiting for data',
+      statusIdleConnected: 'idle · connected', statusPaused: 'paused', statusOffline: 'offline', statusReconnecting: 'reconnecting',
+      statusLoadingDetails: 'Loading details…', statusLastEvent: 'Last event', statusNoEvents: 'no events yet',
+      secondsAgo: 's ago', justNowShort: 'just now', connectingDataStream: 'Connecting to Host data stream…',
       hudRecent: 'last-120s events', hudLinks: 'active links',
     }
 
@@ -2812,6 +2881,15 @@ window.__ModuleLoader__.load({
 .da-status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: rgba(140,160,175,0.8); }
 .da-status-live { color: #9ff0c4; border-color: rgba(61,220,151,0.45); }
 .da-status-live .da-status-dot { background: #3ddc97; box-shadow: 0 0 5px rgba(61,220,151,0.6); }
+.da-status-running { color: #9ff0c4; border-color: rgba(61,220,151,0.45); }
+.da-status-running .da-status-dot { background: #3ddc97; box-shadow: 0 0 5px rgba(61,220,151,0.6); }
+.da-status-idleConnected { color: rgba(180,225,210,0.9); border-color: rgba(61,220,151,0.3); }
+.da-status-idleConnected .da-status-dot { background: #3ddc97; opacity: 0.75; }
+.da-status-paused { color: rgba(200,210,225,0.85); }
+.da-status-offline { color: rgba(255,120,125,0.9); border-color: rgba(255,95,109,0.4); }
+.da-status-offline .da-status-dot { background: #ff5f6d; }
+.da-status-reconnecting { color: rgba(255,192,77,0.9); border-color: rgba(255,192,77,0.4); }
+.da-status-reconnecting .da-status-dot { background: #ffc04d; }
 .da-status-idle { color: rgba(180,205,222,0.85); }
 .da-status-waiting { color: rgba(255,192,77,0.85); border-color: rgba(255,192,77,0.35); }
 /* v8 theme-token surfaces: drawer + console follow host tokens (light => white surfaces,
@@ -5520,9 +5598,19 @@ window.__ModuleLoader__.load({
         })
       }
       const emptyTraffic = !!props.snapshot && activeLinks === 0
-      const waiting = !props.snapshot
-      const running = !props.paused && !waiting && (props.conn === undefined || props.conn === 'live')
-      const statusText = waiting ? t('statusWaiting') : (running ? t('statusRunning') : t('statusIdle'))
+      const [nowTick, setNowTick] = React.useState(function () { return Date.now() })
+      React.useEffect(function statusClock() {
+        const timer = setInterval(function () { setNowTick(Date.now()) }, 1000)
+        return function () { clearInterval(timer) }
+      }, [])
+      const status = deriveRuntimeStatus({
+        snapshot: props.snapshot,
+        paused: props.paused,
+        conn: props.conn,
+        lastEventAt: props.lastEventAt,
+        now: nowTick,
+      })
+      const lastEventLabel = formatLastEventLabel(props.lastEventAt, nowTick, t)
       const stageRef = React.useRef(null)
       const dragRef = React.useRef(null)
       const movedRef = React.useRef(false)
@@ -5627,15 +5715,19 @@ window.__ModuleLoader__.load({
               : String(LAYER_ORDER.length) + ' ' + t('layersUnit') + ' · ' + String(nodes.length) + ' ' + t('nodesUnit'))
           ),
           h('div', { className: 'da-stage-hud da-hud-tr' },
-            h('div', { className: 'da-status-pill da-status-' + (waiting ? 'waiting' : (running ? 'live' : 'idle')) },
+            h('div', { className: 'da-status-pill da-status-' + status.key },
               h('span', { className: 'da-status-dot' }),
-              h('span', null, statusText)
+              h('span', null, t(status.labelKey))
             ),
             h('div', { className: 'da-hud-line' },
               fmtNum(props.eventCount || 0) + ' ' + t('hudRecent') + ' · ' + fmtNum(activeLinks) + ' ' + t('hudLinks')),
-            emptyTraffic
-              ? h('div', { className: 'da-hud-hint' }, t('emptyTraffic'))
-              : h('div', { className: 'da-hud-hint' }, t('liveFlowTag'))
+            h('div', { className: 'da-hud-line' },
+              t('statusLastEvent') + '：' + lastEventLabel),
+            props.snapshotLite
+              ? h('div', { className: 'da-hud-hint' }, t('statusLoadingDetails'))
+              : (emptyTraffic
+                ? h('div', { className: 'da-hud-hint' }, t('emptyTraffic'))
+                : h('div', { className: 'da-hud-hint' }, t('liveFlowTag')))
           ),
           h('div', { className: 'da-zoomctl', role: 'group', 'aria-label': t('zoomLabel') },
             h('div', { className: 'da-zoom-pct', title: t('zoomLabel') }, Math.round(zoom * 100) + '%'),
@@ -5652,8 +5744,7 @@ window.__ModuleLoader__.load({
           props.paused ? h('div', { className: 'da-paused-tag' }, t('paused')) : null,
           !props.snapshot ? h('div', { className: 'da-empty-overlay' },
             h('span', { className: 'da-spin' }),
-            h('span', null, t('waitingSnapshot')),
-            h('span', { style: { opacity: 0.7, fontSize: '10px' } }, t('noSnapshotData'))
+            h('span', null, t('connectingDataStream'))
           ) : null
         )
       )
@@ -7297,6 +7388,8 @@ window.__ModuleLoader__.load({
       const [hoveredEdge, setHoveredEdge] = React.useState(null)
       const [logFilter, setLogFilter] = React.useState({ query: '', group: '', nonce: 0 })
       const [isDark, setIsDark] = React.useState(function () { return resolveThemeDark(props.anatomyTheme) })
+      const [snapshotLite, setSnapshotLite] = React.useState(false)
+      const [lastEventAt, setLastEventAt] = React.useState(0)
 
       const rootRef = React.useRef(null)
       const selectionRef = React.useRef(null)
@@ -7311,6 +7404,8 @@ window.__ModuleLoader__.load({
       const mountedRef = React.useRef(true)
       const eventTotalRef = React.useRef(0)
       const prevWidthRef = React.useRef(0)
+      const snapshotStateRef = React.useRef({ snapshot: null, fullSnapshot: false, lite: false })
+      const lastEventAtRef = React.useRef(0)
 
       const flushNow = React.useCallback(function flushNow() {
         if (!mountedRef.current) return
@@ -7318,12 +7413,18 @@ window.__ModuleLoader__.load({
         if (buffer.snapshot) {
           const snap = buffer.snapshot
           buffer.snapshot = null
-          setSnapshot(snap)
-          if (snap.live && typeof snap.live === 'object') buffer.metrics = buffer.metrics || snap.live
-          if (snap.orgMetrics && typeof snap.orgMetrics === 'object') buffer.orgMetrics = buffer.orgMetrics || snap.orgMetrics
-          if (snap.toolMetrics && typeof snap.toolMetrics === 'object') buffer.toolMetrics = buffer.toolMetrics || snap.toolMetrics
-          if (snap.counts && typeof snap.counts.eventsTotal === 'number') {
-            eventTotalRef.current = Math.max(eventTotalRef.current, num(snap.counts.eventsTotal))
+          const applied = applySnapshotState(snapshotStateRef.current, snap)
+          snapshotStateRef.current = applied.state
+          if (applied.changed) {
+            setSnapshot(applied.state.snapshot)
+            setSnapshotLite(applied.state.lite === true && applied.state.fullSnapshot !== true)
+          }
+          const effective = applied.state.snapshot || snap
+          if (effective.live && typeof effective.live === 'object') buffer.metrics = buffer.metrics || effective.live
+          if (effective.orgMetrics && typeof effective.orgMetrics === 'object') buffer.orgMetrics = buffer.orgMetrics || effective.orgMetrics
+          if (effective.toolMetrics && typeof effective.toolMetrics === 'object') buffer.toolMetrics = buffer.toolMetrics || effective.toolMetrics
+          if (effective.counts && typeof effective.counts.eventsTotal === 'number') {
+            eventTotalRef.current = Math.max(eventTotalRef.current, num(effective.counts.eventsTotal))
             setEventTotal(eventTotalRef.current)
           }
         }
@@ -7331,6 +7432,7 @@ window.__ModuleLoader__.load({
           buffer.eventsDirty = false
           setEvents(eventsRef.current.slice())
           setEventTotal(eventTotalRef.current)
+          setLastEventAt(lastEventAtRef.current)
         }
         if (buffer.metrics) {
           const metrics = buffer.metrics
@@ -7423,6 +7525,7 @@ window.__ModuleLoader__.load({
               }
               accepted.push(event)
             }
+            if (accepted.length > 0) lastEventAtRef.current = Date.now()
             if (accepted.length > 0) {
               const list = eventsRef.current
               for (let i = 0; i < accepted.length; i += 1) list.push(accepted[i])
@@ -7763,6 +7866,7 @@ window.__ModuleLoader__.load({
             t: t, zh: zh, nodes: nodes, heat: heat, flows: flows, selection: selection,
             snapshot: snapshot, theme: props.anatomyTheme, apiRef: apiRef, paused: paused,
             eventCount: eventTotal, view: view, toolNodes: toolNodes, toolFlows: toolFlows, conn: conn,
+            snapshotLite: snapshotLite, lastEventAt: lastEventAt,
             hover: hover, callRows: callDetailRows, callTitle: callDetailTitle, callTotal: callDetailTotal,
             callActive: callActive, hoverEdge: hoveredEdge,
             onSelectDomain: selectDomain, onSelectTool: selectTool,
@@ -7916,6 +8020,10 @@ window.__ModuleLoader__.load({
         colorToLuminance: colorToLuminance,
         shouldIgnoreStageWheel: shouldIgnoreStageWheel,
         fmtMs: fmtMs,
+        deriveRuntimeStatus: deriveRuntimeStatus,
+        formatLastEventLabel: formatLastEventLabel,
+        applySnapshotState: applySnapshotState,
+        RUNNING_WINDOW_MS: RUNNING_WINDOW_MS,
         localizedKind: localizedKind,
         localizedPhase: localizedPhase,
         localizedPluginKind: localizedPluginKind,

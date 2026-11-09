@@ -71,6 +71,17 @@ const MAX_FRAME_BYTES = 64 * 1024
  * few hundred KiB per (debounced) snapshot frame is safe.
  */
 const MAX_SNAPSHOT_FRAME_BYTES = 512 * 1024
+/**
+ * Full-snapshot TTL cache (v8.8): repeated GET /api/snapshot calls and stream
+ * reconnects reuse one build for this long. Any topology change invalidates
+ * the cache immediately, so this only absorbs idle-page reconnect bursts.
+ */
+const SNAPSHOT_CACHE_TTL_MS = 2000
+/**
+ * Lite first-paint snapshot budget (v8.8). The lite frame carries only counts
+ * and 14 light organ rows, so it must stay far below the full ~150 KiB body.
+ */
+const LITE_SNAPSHOT_TARGET_BYTES = 20 * 1024
 /** Max TraceEvents per stream frame. */
 const MAX_FRAME_EVENTS = 80
 /** Default/max page size for GET /api/events. */
@@ -972,6 +983,18 @@ class AnatomyHub {
     this.lastTopologyPushAt = 0
     this.lastMetricsFrameAt = 0
 
+    // v8.8 first-paint support: a lite snapshot frame is sent before the full
+    // one, and the expensive full inventory walk is cached for a short TTL and
+    // coalesced so reconnects do not repeat it.
+    this.snapshotCache = { value: null, builtAt: 0, organCounts: null }
+    this.snapshotBuildInFlight = false
+    this.snapshotCacheHits = 0
+    this.snapshotCacheMisses = 0
+    this.lastFullBuildMs = 0
+    this.lastLiteBuildMs = 0
+    this.lastLiteBytes = 0
+    this.lastSnapshotRequestMs = 0
+
     // HTTP diagnostics (exposed by /api/ping): helps tell "the page never
     // reached the host" apart from "the page reached it but no data flowed".
     this.httpCounts = { ping: 0, snapshot: 0, events: 0, stream: 0 }
@@ -1061,6 +1084,9 @@ class AnatomyHub {
     this.pluginCache = { at: 0, items: null, loading: false }
     this.bundleCache = { at: 0, items: null, loading: false }
     this.clientModuleRelease = null
+    // v8.8 snapshot cache: release the retained full snapshot on unload.
+    this.snapshotCache = { value: null, builtAt: 0, organCounts: null }
+    this.snapshotBuildInFlight = false
   }
 
   /** Log once-ish through the Cordis logger; never throw. */
@@ -1229,6 +1255,15 @@ class AnatomyHub {
     if (!this.active) return
     const now = nowMs()
     if (this.dirtyAt === 0) this.dirtyAt = now
+    // A composition/topology change must never be served from the TTL cache.
+    this.invalidateSnapshotCache()
+  }
+
+  /** Drop the cached full snapshot (next reader rebuilds it). */
+  invalidateSnapshotCache() {
+    this.snapshotCache.value = null
+    this.snapshotCache.builtAt = 0
+    this.snapshotCache.organCounts = null
   }
 
   /** Forget the cached plugin inventory (next snapshot refreshes it). */
@@ -2745,6 +2780,36 @@ class AnatomyHub {
   }
 
   /**
+   * One organ's visual vitals (status + intensity) from its rolling counters.
+   * Shared by the full snapshot (collectOrgans) and the cheap lite first-paint
+   * snapshot (buildLiteSnapshot) so both always agree.
+   * @param {object} def - organ definition
+   * @param {number} components - plugins+services+tools+visible agents
+   * @param {number} failedPlugins - failed plugin rows owned by the organ
+   * @param {number} [runningAgents] - optional precomputed running-agent count
+   * @returns {{status:string,intensity:number,events10:number,errors15:number,approvals30:number}}
+   */
+  organVitals(def, components, failedPlugins, runningAgents) {
+    const second = currentSecond()
+    const series = this.orgSeries.get(def.id)
+    const events10 = seriesWindow(series, 'events', 10, second)
+    const calls10 = seriesWindow(series, 'calls', 10, second)
+    const errors15 = seriesWindow(series, 'errors', 15, second)
+    const approvals30 = seriesWindow(series, 'approvals', 30, second)
+    const activeAgents = typeof runningAgents === 'number' ? runningAgents : this.countRunningAgents()
+    let intensity = clamp01((events10 + calls10 * 1.5) / 20)
+    if (def.id === 'heart' && this.activeLlm > 0) intensity = Math.max(intensity, 0.65)
+    if (def.id === 'cortex' && activeAgents > 0) intensity = Math.max(intensity, 0.5)
+    if (def.id === 'stomach' && this.runningTools > 0) intensity = Math.max(intensity, 0.45)
+    let status = 'idle'
+    if (components === 0) status = 'offline'
+    else if (errors15 > 0) status = 'error'
+    else if (approvals30 > 0 || failedPlugins > 0) status = 'warn'
+    else if (events10 > 0 || intensity > 0.02) status = 'active'
+    return { status, intensity: Math.round(intensity * 100) / 100, events10, errors15, approvals30 }
+  }
+
+  /**
    * Build the 14 OrganViews from the collected inventories.
    * @param {object[]} plugins
    * @param {object[]} services
@@ -2754,7 +2819,6 @@ class AnatomyHub {
    * @returns {object[]}
    */
   collectOrgans(plugins, services, tools, clientBundles, agents) {
-    const second = currentSecond()
     const pluginsByOrgan = new Map()
     const servicesByOrgan = new Map()
     const toolsByOrgan = new Map()
@@ -2807,21 +2871,8 @@ class AnatomyHub {
         const organAgents = agentsByOrgan.get(def.id) ?? []
         const skinClientCount = def.id === 'skin' ? clientBundles.length : 0
         const components = organPlugins.length + organServices.length + organTools.length + organAgents.length + skinClientCount
-        const series = this.orgSeries.get(def.id)
-        const events10 = seriesWindow(series, 'events', 10, second)
-        const calls10 = seriesWindow(series, 'calls', 10, second)
-        const errors15 = seriesWindow(series, 'errors', 15, second)
-        const approvals30 = seriesWindow(series, 'approvals', 30, second)
-        let intensity = clamp01((events10 + calls10 * 1.5) / 20)
-        if (def.id === 'heart' && this.activeLlm > 0) intensity = Math.max(intensity, 0.65)
-        if (def.id === 'cortex' && runningAgents > 0) intensity = Math.max(intensity, 0.5)
-        if (def.id === 'stomach' && this.runningTools > 0) intensity = Math.max(intensity, 0.45)
         const failedPlugins = failedPluginsByOrgan.get(def.id) ?? 0
-        let status = 'idle'
-        if (components === 0) status = 'offline'
-        else if (errors15 > 0) status = 'error'
-        else if (approvals30 > 0 || failedPlugins > 0) status = 'warn'
-        else if (events10 > 0 || intensity > 0.02) status = 'active'
+        const vitals = this.organVitals(def, components, failedPlugins, runningAgents)
         views.push({
           id: def.id,
           nameZh: def.nameZh,
@@ -2832,8 +2883,8 @@ class AnatomyHub {
           x: def.x,
           y: def.y,
           size: def.size,
-          status,
-          intensity: Math.round(intensity * 100) / 100,
+          status: vitals.status,
+          intensity: vitals.intensity,
           metrics: this.organMetrics(def.id),
           plugins: organPlugins,
           services: organServices,
@@ -2865,14 +2916,394 @@ class AnatomyHub {
     return views
   }
 
-  // ── 06.8 snapshot assembly ──────────────────────────────────────────────
+  // ── 06.8a v8.8 first paint: lite snapshot + full-snapshot cache ─────────
+
+  /** Cheap DSH version lookup for the lite frame (no inventory walk). */
+  quickDshVersion() {
+    try {
+      if (this.clientModuleRelease && this.clientModuleRelease.version) {
+        return safeString(this.clientModuleRelease.version, 60) || 'unknown'
+      }
+      const clientModules = this.getService('clientModules')
+      const graph = clientModules && typeof clientModules.graph === 'function' ? clientModules.graph() : null
+      if (graph && isRecord(graph.release)) {
+        this.clientModuleRelease = graph.release
+        return safeString(graph.release.version, 60) || 'unknown'
+      }
+    } catch {
+      // release identity is cosmetic for first paint
+    }
+    return 'unknown'
+  }
+
+  /**
+   * Minimal inventory probe for the lite snapshot: names/phases only, no
+   * PluginView/ServiceView/ToolView objects, no fiber tree, no method
+   * reflection. Every source is isolated; on a real profile this is a few ms.
+   * @returns {{pluginRows:object[],services:string[],tools:string[],agents:object[],clientBundles:number}}
+   */
+  quickInventories() {
+    const result = { pluginRows: [], services: [], tools: [], agents: [], clientBundles: 0 }
+    // Loader entries: one cheap iteration; group rows are composition nodes.
+    try {
+      const loader = this.getService('loader')
+      if (loader && typeof loader.entries === 'function') {
+        for (const entry of loader.entries()) {
+          try {
+            const options = isRecord(entry && entry.options) ? entry.options : {}
+            if (options.group === true) continue
+            const entryId = this.loaderEntryId(entry)
+            if (!entryId) continue
+            const moduleName = safeString(options.name, 200) || entryId
+            let phase = null
+            try {
+              const fiber = entry.fiber
+              if (fiber) phase = fiberStateName(fiber.state)
+            } catch {
+              phase = null
+            }
+            result.pluginRows.push({ moduleName, phase })
+          } catch {
+            // skip malformed entry
+          }
+        }
+      }
+    } catch {
+      // Loader is optional
+    }
+    // pluginManager fallback when the Loader is unavailable or empty.
+    if (result.pluginRows.length === 0) {
+      try {
+        const items = Array.isArray(this.pluginCache.items) ? this.pluginCache.items : []
+        for (const item of items) {
+          const moduleName = safeString(item && item.moduleName, 200)
+          if (!moduleName) continue
+          result.pluginRows.push({ moduleName, phase: safeString(item.fiberPhase, 20) || null })
+        }
+      } catch {
+        // optional cache
+      }
+      if (nowMs() - this.pluginCache.at > PLUGIN_CACHE_TTL_MS) this.refreshPlugins()
+    }
+    // Services: unique impl names only (no method-name reflection).
+    try {
+      const reflect = this.ctx && this.ctx.reflect
+      const store = reflect ? reflect.store : undefined
+      if (isRecord(store)) {
+        const seen = new Set()
+        for (const key of Reflect.ownKeys(store)) {
+          try {
+            const impl = store[key]
+            if (!isRecord(impl)) continue
+            const serviceName = safeString(impl.name, 120) || safeString(key, 120)
+            if (!serviceName || seen.has(serviceName)) continue
+            seen.add(serviceName)
+            result.services.push(serviceName)
+          } catch {
+            // skip malformed service record
+          }
+        }
+      }
+    } catch {
+      // reflect is optional
+    }
+    // Tools: the public global schema view (already deep-cloned by the service).
+    try {
+      const service = this.getService('tools')
+      if (service && typeof service.schemas === 'function') {
+        const schemas = service.schemas()
+        if (Array.isArray(schemas)) {
+          for (const schema of schemas) {
+            const toolName = safeString(schema && schema.name, 120)
+            if (toolName) result.tools.push(toolName)
+          }
+        }
+      }
+    } catch {
+      // tools are optional
+    }
+    // Agents: identities and owning organ only.
+    try {
+      const agentsService = this.getService('agents')
+      if (agentsService && typeof agentsService.list === 'function') {
+        const list = agentsService.list()
+        if (Array.isArray(list)) {
+          for (const agent of list) {
+            const id = safeString(agent && agent.id, 120)
+            if (!id) continue
+            const bookkeeping = this.agents.get(id)
+            result.agents.push({ id, organ: bookkeeping && bookkeeping.organ === 'agents' ? 'agents' : 'cortex' })
+          }
+        }
+      }
+    } catch {
+      // agents are optional
+    }
+    // Client bundle rows power the skin's composition count.
+    try {
+      const clientModules = this.getService('clientModules')
+      const graph = clientModules && typeof clientModules.graph === 'function' ? clientModules.graph() : null
+      if (graph && Array.isArray(graph.entries)) {
+        result.clientBundles = graph.entries.length
+        if (isRecord(graph.release)) this.clientModuleRelease = graph.release
+      }
+    } catch {
+      // client modules are optional
+    }
+    return result
+  }
+
+  /**
+   * Count all organ members without the MAX_ORGAN_MEMBERS display cap.
+   * @returns {Map<string,{plugins:number,services:number,tools:number,agents:number}>}
+   */
+  countOrganMembers(plugins, services, tools, agents) {
+    const counts = new Map()
+    const ensure = organ => {
+      const safeOrgan = ORGAN_BY_ID.has(organ) ? organ : 'spine'
+      let entry = counts.get(safeOrgan)
+      if (!entry) {
+        entry = { plugins: 0, services: 0, tools: 0, agents: 0 }
+        counts.set(safeOrgan, entry)
+      }
+      return entry
+    }
+    try {
+      for (const plugin of Array.isArray(plugins) ? plugins : []) ensure(plugin && plugin.organ).plugins += 1
+    } catch {
+      // degrade
+    }
+    try {
+      for (const service of Array.isArray(services) ? services : []) ensure(service && service.organ).services += 1
+    } catch {
+      // degrade
+    }
+    try {
+      for (const tool of Array.isArray(tools) ? tools : []) ensure(tool && tool.organ).tools += 1
+    } catch {
+      // degrade
+    }
+    try {
+      for (const agent of Array.isArray(agents) ? agents : []) {
+        ensure(agent && agent.organ === 'agents' ? 'agents' : 'cortex').agents += 1
+      }
+    } catch {
+      // degrade
+    }
+    return counts
+  }
+
+  /** Counts block derived from a full snapshot (no inventory walk). */
+  liteCountsFromFull(full) {
+    const counts = isRecord(full && full.counts) ? full.counts : {}
+    const count = value => {
+      const numeric = Number(value)
+      return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0
+    }
+    return {
+      plugins: count(counts.plugins),
+      pluginsActive: count(counts.pluginsActive),
+      pluginsFailed: count(counts.pluginsFailed),
+      services: count(counts.services),
+      tools: count(counts.tools),
+      agents: count(counts.agents),
+      sessions: count(counts.sessions),
+      eventsTotal: count(counts.eventsTotal),
+      organs: ORGAN_DEFS.length,
+    }
+  }
+
+  /** One light organ row in the lite snapshot vocabulary. */
+  liteOrganRow(def, counts, vitals) {
+    let plugins = Number(counts && counts.plugins)
+    let services = Number(counts && counts.services)
+    let tools = Number(counts && counts.tools)
+    let agents = Number(counts && counts.agents)
+    if (!Number.isFinite(plugins) || plugins < 0) plugins = 0
+    if (!Number.isFinite(services) || services < 0) services = 0
+    if (!Number.isFinite(tools) || tools < 0) tools = 0
+    if (!Number.isFinite(agents) || agents < 0) agents = 0
+    const intensity = clamp01(Number(vitals && vitals.intensity))
+    return {
+      id: def.id,
+      name: def.nameZh,
+      nameZh: def.nameZh,
+      nameEn: def.nameEn,
+      status: safeString(vitals && vitals.status, 20) || 'idle',
+      intensity: Math.round(intensity * 100) / 100,
+      activity: Math.round(intensity * 100) / 100,
+      counts: {
+        plugins: Math.round(plugins),
+        services: Math.round(services),
+        tools: Math.round(tools),
+        agents: Math.round(agents),
+      },
+      metrics: this.organMetrics(def.id),
+    }
+  }
+
+  /** One light organ row derived from the cached full snapshot's OrganView. */
+  liteOrganFromFull(organ) {
+    const organId = organ && ORGAN_BY_ID.has(organ.id) ? organ.id : 'spine'
+    const def = ORGAN_BY_ID.get(organId)
+    const memberCounts = this.snapshotCache.organCounts ? this.snapshotCache.organCounts.get(organId) : null
+    const counts = memberCounts ?? {
+      plugins: Array.isArray(organ && organ.plugins) ? organ.plugins.length : 0,
+      services: Array.isArray(organ && organ.services) ? organ.services.length : 0,
+      tools: Array.isArray(organ && organ.tools) ? organ.tools.length : 0,
+      agents: Number.isFinite(Number(organ && organ.agents)) ? Number(organ.agents) : 0,
+    }
+    return this.liteOrganRow(def, counts, {
+      status: safeString(organ && organ.status, 20) || 'idle',
+      intensity: Number(organ && organ.intensity),
+    })
+  }
+
+  /**
+   * Build the v8.8 lite first-paint snapshot: schemaVersion/version/
+   * generatedAt/seq + full counts + 14 light organ rows. Deliberately carries
+   * NO plugins/services/tools/agents/models/bundles/clientBundles/topology
+   * arrays. When the full-snapshot cache is warm this is a pure remap
+   * (sub-millisecond); otherwise it runs the minimal inventory probe above.
+   * @returns {object}
+   */
+  buildLiteSnapshot() {
+    const startedAt = nowMs()
+    const cached = this.snapshotCache.value
+    let counts
+    let organs
+    if (cached && isRecord(cached) && Array.isArray(cached.organs)) {
+      counts = this.liteCountsFromFull(cached)
+      organs = cached.organs.map(organ => this.liteOrganFromFull(organ))
+    } else {
+      counts = {
+        plugins: 0,
+        pluginsActive: 0,
+        pluginsFailed: 0,
+        services: 0,
+        tools: 0,
+        agents: 0,
+        sessions: 0,
+        eventsTotal: this.eventsTotal,
+        organs: ORGAN_DEFS.length,
+      }
+      organs = ORGAN_DEFS.map(def => this.liteOrganRow(def, null, { status: 'idle', intensity: 0 }))
+      try {
+        const inventories = this.quickInventories()
+        const memberCounts = new Map()
+        const ensure = organ => {
+          const safeOrgan = ORGAN_BY_ID.has(organ) ? organ : 'spine'
+          let entry = memberCounts.get(safeOrgan)
+          if (!entry) {
+            entry = { plugins: 0, services: 0, tools: 0, agents: 0 }
+            memberCounts.set(safeOrgan, entry)
+          }
+          return entry
+        }
+        const failedByOrgan = new Map()
+        let pluginsActive = 0
+        let pluginsFailed = 0
+        for (const row of inventories.pluginRows) {
+          const organ = organForPlugin(row.moduleName)
+          ensure(organ).plugins += 1
+          if (row.phase === 'active') pluginsActive += 1
+          if (row.phase === 'failed') {
+            pluginsFailed += 1
+            failedByOrgan.set(organ, (failedByOrgan.get(organ) ?? 0) + 1)
+          }
+        }
+        for (const serviceName of inventories.services) ensure(organForService(serviceName)).services += 1
+        for (const toolName of inventories.tools) ensure(organForTool(toolName)).tools += 1
+        for (const agent of inventories.agents) ensure(agent.organ).agents += 1
+        // Client bundles render on the skin; the full snapshot shows them as
+        // client-kind plugin rows.
+        if (inventories.clientBundles > 0) ensure('skin').plugins += inventories.clientBundles
+        const runningAgents = this.countRunningAgents()
+        counts = {
+          plugins: inventories.pluginRows.length + inventories.clientBundles,
+          pluginsActive,
+          pluginsFailed,
+          services: inventories.services.length,
+          tools: inventories.tools.length,
+          agents: inventories.agents.length,
+          sessions: this.countSessions(),
+          eventsTotal: this.eventsTotal,
+          organs: ORGAN_DEFS.length,
+        }
+        organs = ORGAN_DEFS.map(def => {
+          const members = memberCounts.get(def.id) ?? { plugins: 0, services: 0, tools: 0, agents: 0 }
+          const components = members.plugins + members.services + members.tools + members.agents
+          const vitals = this.organVitals(def, components, failedByOrgan.get(def.id) ?? 0, runningAgents)
+          return this.liteOrganRow(def, members, vitals)
+        })
+      } catch (error) {
+        this.warn('lite inventory probe failed', error)
+      }
+    }
+    const lite = {
+      // The flag lives inside the snapshot too: the client's onSnapshot hook
+      // receives only frame.snapshot, so it can tell a first-paint frame apart.
+      lite: true,
+      schemaVersion: SCHEMA_VERSION,
+      version: cached && isRecord(cached.runtime) ? safeString(cached.runtime.dshVersion, 60) || 'unknown' : this.quickDshVersion(),
+      generatedAt: nowMs(),
+      seq: this.seq,
+      counts,
+      organs,
+    }
+    this.lastLiteBuildMs = Math.max(0, nowMs() - startedAt)
+    return lite
+  }
+
+  /**
+   * Return the complete snapshot from the short TTL cache, or build it once.
+   * A reentrant caller during an in-flight synchronous build reuses the
+   * previous value instead of starting a second inventory walk (coalescing).
+   * @returns {object}
+   */
+  getFullSnapshot() {
+    const cache = this.snapshotCache
+    const now = nowMs()
+    if (cache.value && cache.builtAt > 0 && now - cache.builtAt <= SNAPSHOT_CACHE_TTL_MS) {
+      this.snapshotCacheHits += 1
+      return cache.value
+    }
+    if (this.snapshotBuildInFlight && cache.value) {
+      this.snapshotCacheHits += 1
+      return cache.value
+    }
+    this.snapshotCacheMisses += 1
+    this.snapshotBuildInFlight = true
+    const startedAt = nowMs()
+    try {
+      const value = this.buildFullSnapshot()
+      cache.value = value
+      cache.builtAt = nowMs()
+      try {
+        cache.organCounts = this.countOrganMembers(value.plugins, value.services, value.tools, value.agents)
+      } catch {
+        cache.organCounts = null
+      }
+      this.lastFullBuildMs = Math.max(0, cache.builtAt - startedAt)
+      return value
+    } finally {
+      this.snapshotBuildInFlight = false
+    }
+  }
+
+  /** Back-compat alias: callers get the cached full snapshot. */
+  buildSnapshot() {
+    return this.getFullSnapshot()
+  }
+
+  // ── 06.8b snapshot assembly ─────────────────────────────────────────────
 
   /**
    * Build a complete, defensive snapshot (CONTRACT §3).
    * Every source is isolated: one broken inventory degrades to an empty array.
    * @returns {object}
    */
-  buildSnapshot() {
+  buildFullSnapshot() {
     const generatedAt = nowMs()
     // Source collection, one try/catch per block.
     let clientBundles = []
@@ -3006,7 +3437,10 @@ class AnatomyHub {
 
   // ── 06.9 HTTP routes ────────────────────────────────────────────────────
 
-  /** Write one JSON HTTP response defensively. */
+  /**
+   * Write one JSON HTTP response defensively.
+   * @returns {number} serialized body size in bytes (0 when unknown)
+   */
   writeJson(res, status, payload, extraHeaders) {
     let body
     try {
@@ -3014,6 +3448,12 @@ class AnatomyHub {
       if (typeof body !== 'string') body = '{"ok":false,"error":"response is not JSON"}'
     } catch (error) {
       body = JSON.stringify({ ok: false, error: errorText(error, 160) })
+    }
+    let bodyBytes = 0
+    try {
+      bodyBytes = byteLength(body)
+    } catch {
+      bodyBytes = 0
     }
     const headers = {
       'content-type': 'application/json; charset=utf-8',
@@ -3026,11 +3466,7 @@ class AnatomyHub {
       'access-control-allow-origin': '*',
       ...(extraHeaders ?? {}),
     }
-    try {
-      headers['content-length'] = String(byteLength(body))
-    } catch {
-      // length is an optimisation only
-    }
+    if (bodyBytes > 0) headers['content-length'] = String(bodyBytes)
     try {
       if (res && typeof res.writeHead === 'function') {
         res.writeHead(status, headers)
@@ -3052,6 +3488,7 @@ class AnatomyHub {
     } catch {
       // a dead response must not throw into the route
     }
+    return bodyBytes
   }
 
   /** Wrap a route handler with method filtering and a catch-all. */
@@ -3185,6 +3622,16 @@ class AnatomyHub {
       lastStreamRequestAt: this.lastStreamRequestAt,
       requestLog: this.requestLog.slice(-6),
       snapshotBytes: this.lastSnapshotBytes,
+      // v8.8 staged first paint / snapshot cache visibility.
+      snapshot: {
+        cacheTtlMs: SNAPSHOT_CACHE_TTL_MS,
+        cacheHits: this.snapshotCacheHits,
+        cacheMisses: this.snapshotCacheMisses,
+        lastFullBuildMs: this.lastFullBuildMs,
+        lastLiteBuildMs: this.lastLiteBuildMs,
+        lastLiteBytes: this.lastLiteBytes,
+        lastSnapshotRequestMs: this.lastSnapshotRequestMs,
+      },
       uptimeMs: Math.max(0, nowMs() - this.startedAt),
     }
   }
@@ -3202,20 +3649,25 @@ class AnatomyHub {
 
   /** GET /api/snapshot */
   handleSnapshot(_req, res) {
+    const startedAt = nowMs()
     let snapshot
     try {
+      // Cached (2 s TTL) + coalesced: repeats and stream reconnects are cheap.
       snapshot = this.buildSnapshot()
     } catch (error) {
       this.warn('snapshot request failed', error)
       this.writeJson(res, 500, { ok: false, error: 'snapshot build failed', schemaVersion: SCHEMA_VERSION })
       return
     }
+    this.lastSnapshotRequestMs = Math.max(0, nowMs() - startedAt)
+    // `writeJson` serializes once; reuse its byte count instead of stringifying
+    // the (large) snapshot a second time just for diagnostics.
     try {
-      this.lastSnapshotBytes = JSON.stringify(snapshot).length
+      this.lastSnapshotBytes = this.writeJson(res, 200, snapshot) || 0
     } catch {
       this.lastSnapshotBytes = 0
+      this.writeJson(res, 200, snapshot)
     }
-    this.writeJson(res, 200, snapshot)
   }
 
   /** GET /api/events?after=&limit= */
@@ -3293,6 +3745,24 @@ class AnatomyHub {
     } catch {
       // some carriers own their headers
     }
+    // v8.8 staged first paint, contractual order:
+    //   hello → snapshot(lite:true) → snapshot(full) → events/metrics/…
+    // The lite body carries no heavy arrays and is written BEFORE the full
+    // inventory walk, so the HUD skeleton paints immediately even when the
+    // full snapshot takes hundreds of milliseconds to assemble.
+    const client = { res, cursor: this.seq, lastWriteAt: 0, closed: false }
+    const helloOk = this.writeFrame(client, { type: 'hello', schemaVersion: SCHEMA_VERSION, seq: 0, serverTime: nowMs() })
+    if (!helloOk) {
+      this.dropClient(client, 'initial-write-failed')
+      return
+    }
+    try {
+      const lite = this.buildLiteSnapshot()
+      this.lastLiteBytes = frameBytes({ type: 'snapshot', lite: true, seq: lite.seq, snapshot: lite })
+      this.writeFrame(client, this.fitLiteFrame(lite))
+    } catch (error) {
+      this.warn('stream lite snapshot failed', error)
+    }
     let snapshot
     try {
       snapshot = this.buildSnapshot()
@@ -3305,10 +3775,9 @@ class AnatomyHub {
       }
       return
     }
-    const client = { res, cursor: snapshot.seq, lastWriteAt: 0, closed: false }
-    const helloOk = this.writeFrame(client, { type: 'hello', schemaVersion: SCHEMA_VERSION, seq: 0, serverTime: nowMs() })
-    const snapshotOk = helloOk && this.writeFrame(client, this.fitSnapshotFrame(snapshot))
-    if (!helloOk || !snapshotOk) {
+    client.cursor = snapshot.seq
+    const snapshotOk = this.writeFrame(client, this.fitSnapshotFrame(snapshot))
+    if (!snapshotOk) {
       this.dropClient(client, 'initial-write-failed')
       return
     }
@@ -3382,9 +3851,9 @@ class AnatomyHub {
     }
   }
 
-  /** Fit a snapshot into one ≤64 KiB stream frame (shape-compatible). */
+  /** Fit a snapshot into one stream frame (shape-compatible); full → lite:false. */
   fitSnapshotFrame(snapshot) {
-    const wrap = candidate => ({ type: 'snapshot', seq: candidate && typeof candidate.seq === 'number' ? candidate.seq : this.seq, snapshot: candidate })
+    const wrap = candidate => ({ type: 'snapshot', lite: false, seq: candidate && typeof candidate.seq === 'number' ? candidate.seq : this.seq, snapshot: candidate })
     let frame = wrap(snapshot)
     if (frameBytes(frame) <= MAX_SNAPSHOT_FRAME_BYTES) return frame
     const topologyOf = candidate => (isRecord(candidate.topology) ? candidate.topology : { rootUid: 0, fibers: [] })
@@ -3435,6 +3904,38 @@ class AnatomyHub {
       } catch {
         // try the next reduction
       }
+    }
+    return frame
+  }
+
+  /** Fit the lite first-paint snapshot into its ≤20 KiB budget. */
+  fitLiteFrame(lite) {
+    const wrap = candidate => ({ type: 'snapshot', lite: true, seq: candidate && typeof candidate.seq === 'number' ? candidate.seq : this.seq, snapshot: candidate })
+    let frame = wrap(lite)
+    if (frameBytes(frame) <= LITE_SNAPSHOT_TARGET_BYTES) return frame
+    // Stage 1: drop the per-organ rolling metrics block.
+    try {
+      frame = wrap({
+        ...lite,
+        organs: (Array.isArray(lite.organs) ? lite.organs : []).map(organ => ({
+          id: organ.id,
+          name: organ.name,
+          status: organ.status,
+          intensity: organ.intensity,
+          activity: organ.activity,
+          counts: organ.counts,
+        })),
+        trimmed: true,
+      })
+      if (frameBytes(frame) <= LITE_SNAPSHOT_TARGET_BYTES) return frame
+    } catch {
+      // fall through to the minimal body
+    }
+    // Stage 2: minimal identity + counts.
+    try {
+      frame = wrap({ lite: true, schemaVersion: lite.schemaVersion, version: lite.version, generatedAt: lite.generatedAt, seq: lite.seq, counts: lite.counts, organs: [], trimmed: true })
+    } catch {
+      // keep stage 1 frame
     }
     return frame
   }
@@ -3570,6 +4071,20 @@ function buildSnapshot(hub) {
   }
 }
 
+/**
+ * Build the lite first-paint snapshot from a hub instance (tests only).
+ * @param {AnatomyHub} hub
+ * @returns {object|null}
+ */
+function buildLiteSnapshot(hub) {
+  try {
+    if (hub && typeof hub.buildLiteSnapshot === 'function') return hub.buildLiteSnapshot()
+    return null
+  } catch {
+    return null
+  }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // 08. Plugin entry
 // ────────────────────────────────────────────────────────────────────────────
@@ -3593,6 +4108,7 @@ export function apply(ctx, _config) {
 
 export const __internals = {
   buildSnapshot,
+  buildLiteSnapshot,
   organForTool,
   organForPlugin,
   organForService,

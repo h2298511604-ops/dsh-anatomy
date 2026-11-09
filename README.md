@@ -30,8 +30,9 @@
 `ctx.effect` 清理，不留后台定时器。
 
 **打开方式**：点击左侧栏「架构透视」图标（面板 id = `anatomy`）→ 主区域整页打开
-「DSH 架构透视 · 实时架构」；再点一次侧栏图标或切换到其他面板即可关闭。首帧快照到达前显示
-`connecting` 骨架，之后变为 `live`。
+「DSH 架构透视 · 实时架构」；再点一次侧栏图标或切换到其他面板即可关闭。打开时先收到约 4 KB 的
+**lite 快照**（14 个组件域的计数），骨架立即消失、舞台先出；随后全量快照（约 200 KB）到达后补全
+插件/服务/工具详情与连线，无需再等整页刷新。
 
 ## 它显示什么
 
@@ -53,13 +54,13 @@
 - 节点是圆角矩形卡片（细边框 + 状态点 + 技术名 + 组件数 + 细活动条；速率统一显示为「n 次/min」，
   代表作在悬停或选中时的浮层显示），把 Host 快照里的插件、服务、工具数量汇总到所属组件域；点击节点 → 右栏详情。
 - **连线只来自真实观测到的调用**：按近 120s 的事件聚合出「来源 → 目标」边，只画实际发生过的调用；
-  空闲时舞台右上角状态区（等待数据 / 运行中 / 空闲 + 近 120s 事件 / 活跃链路）以一行小字提示
-  「暂无调用 · 运行中会在这里流动」，节点仍然可见。
-- **连线全部为平滑曲线，默认按 lane 布线**：相邻列用平缓水平 S 曲线；同列用小幅垂直 S（水平弓 ≤18）；
-  跨 2 列以上走层框之间空白 gutter（272 / 504 / 736 / 968）的 r=12 圆角折线，同一 gutter 内多条线按 x lane
-  错开（间距 8、范围 ±28）避免重叠；只有 lane 仍撞到卡片时才回退到避障曲线。双向流量仍画成两条整条平行偏移
-  （法向 ±10）的独立曲线，各自有圆点与标签；端点从卡片边界按上 / 下 / 左 / 右法向离开，不穿过卡片；
-  没有反向流量时只画真实观测到的那一条，不造线。连线标签为「n 次/min」（近 120s 调用次数），
+  舞台右上角状态区显示 等待数据 / 运行中 / 已连接 · 空闲 / 已暂停 / 离线，按最近 15s 内是否有事件判定，
+  并显示「最近事件：x 秒前」；无流量时一行小字提示「暂无调用 · 有调用时会在这里流动」，节点仍然可见。
+- **连线全部为平滑曲线，默认按 lane 布线**：相邻列用弧度适中的水平 S 曲线（控制点 = clamp(0.5×水平距离, 40, 140)）；
+  同列用垂直 S 曲线（横向弓 ≤22）；跨 2 列以上走层框之间空白 gutter（272 / 504 / 736 / 968）的 r=16 圆角折线，
+  同一 gutter 内多条线按 x lane 错开（间距 16、范围 ±48）避免重叠；只有 lane 仍撞到卡片时才回退到避障曲线。
+  双向流量画成两条整条平行偏移（法向 ±20）的独立曲线，各自有圆点与标签；端点从卡片边界按上 / 下 / 左 / 右
+  法向离开，不穿过卡片；没有反向流量时只画真实观测到的那一条，不造线。连线标签为「n 次/min」（近 120s 调用次数），
   默认只在高频（≥5 次）或悬停 / 选中时显示。
 - **方向由圆点表示**：每条有流量的连线用严格沿自身曲线移动的 SVG 圆点标示方向（源 → 目标）；
   圆点数量与速度随近 120s 调用量增大，事件发生时出现对应类型颜色的更亮圆点。点击连线 → 右栏「调用关系详情」。
@@ -236,7 +237,7 @@ Header（标题 + DSH 版本/Node/profile/pid 副标题 + 连接状态点 + 事�
 | GET | `/dsh-anatomy/api/ping` | 安装自检 | `ok:true`、`plugin:'dsh-anatomy'`、`schemaVersion:1`、`uptimeMs` |
 | GET | `/dsh-anatomy/api/snapshot` | 完整快照 | `ok`、`schemaVersion:1`、`generatedAt`、`seq`、`runtime`、`organs[14]`、`plugins`、`services`、`tools`、`agents`、`models`、`bundles`、`clientBundles`、`topology`、`counts`、`live`、`orgMetrics`、`toolMetrics` |
 | GET | `/dsh-anatomy/api/events?after=<seq>&limit=<n>` | 轮询增量 | `ok`、`seq`（轮询游标=本页最后一条事件 id）、`reset`、`events[]`、`metrics`、`orgMetrics`、`toolMetrics`、`snapshotChanged` |
-| GET | `/dsh-anatomy/api/stream` | NDJSON 长连接 | 每行一个 JSON：`hello` → `snapshot` → 每 ~2s 推 `metrics` 帧（运行指标/sparkline 数据源）→ 有事件时约 250ms 一帧 `events`；拓扑变化推 `snapshot`；空闲 15s 推 `ping` |
+| GET | `/dsh-anatomy/api/stream` | NDJSON 长连接 | 每行一个 JSON：`hello` → `snapshot`（lite，~4 KB，先用轻量计数渲染首屏）→ `snapshot`（全量）→ 每 ~2s 推 `metrics` 帧（运行指标/sparkline 数据源）→ 有事件时约 250ms 一帧 `events`；拓扑变化推 `snapshot`；空闲 15s 推 `ping` |
 
 非 GET 请求返回 `405`；其他路径不注册 fallback。handler 内部全部 try/catch，异常时返回
 `{ok:false,error:<message>}` 且不冒泡。
