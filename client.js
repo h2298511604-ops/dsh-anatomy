@@ -665,6 +665,165 @@ window.__ModuleLoader__.load({
       return { state: { snapshot: incoming, fullSnapshot: true, lite: false }, changed: true }
     }
 
+    /**
+     * Simplified diagrams.net-style edge: one moderate cubic between anchors.
+     * Side choice: |dx| >= |dy| → left/right, else top/bottom. Control offset
+     * along the main axis = clamp(0.5 * axis distance, 40, 160).
+     */
+    function simpleEdgeRoute(start, end) {
+      const dx = num(end.x) - num(start.x)
+      const dy = num(end.y) - num(start.y)
+      const horizontal = Math.abs(dx) >= Math.abs(dy)
+      const distance = clamp((horizontal ? Math.abs(dx) : Math.abs(dy)) * 0.5, 40, 160)
+      const startSide = horizontal ? (dx >= 0 ? 'right' : 'left') : (dy >= 0 ? 'bottom' : 'top')
+      const endSide = horizontal ? (dx >= 0 ? 'left' : 'right') : (dy >= 0 ? 'top' : 'bottom')
+      const outStart = sideOutwardVector(startSide)
+      const outEnd = sideOutwardVector(endSide)
+      return routeFromControls({
+        x1: num(start.x), y1: num(start.y),
+        c1x: round1(num(start.x) + outStart.x * distance), c1y: round1(num(start.y) + outStart.y * distance),
+        c2x: round1(num(end.x) + outEnd.x * distance), c2y: round1(num(end.y) + outEnd.y * distance),
+        x2: num(end.x), y2: num(end.y),
+      })
+    }
+
+    /** Filter events down to one session ('' / missing id = all sessions). */
+    function filterEventsBySession(events, sessionId) {
+      const list = Array.isArray(events) ? events : []
+      const wanted = String(sessionId || '')
+      if (!wanted) return list
+      return list.filter(function (event) {
+        return event && String(event.sessionId || '') === wanted
+      })
+    }
+
+    /** Sessions from the Host snapshot (or derived from event sessionIds). */
+    function deriveSessions(snapshot, events, limit) {
+      const cap = typeof limit === 'number' ? limit : 24
+      const snapshotSessions = snapshot && Array.isArray(snapshot.sessions) ? snapshot.sessions : []
+      const activeId = snapshot && snapshot.activeSessionId ? String(snapshot.activeSessionId) : ''
+      const seen = Object.create(null)
+      const rows = []
+      for (let i = 0; i < snapshotSessions.length; i += 1) {
+        const item = snapshotSessions[i]
+        const id = item && (item.id || item.sessionId)
+        if (!id || seen[String(id)]) continue
+        seen[String(id)] = true
+        rows.push({
+          id: String(id),
+          title: String(item.title || item.name || String(id).slice(0, 8)),
+          active: String(id) === activeId || item.active === true,
+        })
+      }
+      const eventList = Array.isArray(events) ? events : []
+      for (let i = eventList.length - 1; i >= 0; i -= 1) {
+        const sid = eventList[i] && eventList[i].sessionId ? String(eventList[i].sessionId) : ''
+        if (!sid || seen[sid]) continue
+        seen[sid] = true
+        rows.push({ id: sid, title: sid.slice(0, 8), active: sid === activeId })
+      }
+      return rows.slice(0, cap)
+    }
+
+    /** Session-scoped live metrics from the filtered event window. */
+    function deriveSessionMetrics(events, windowMs, now) {
+      const span = typeof windowMs === 'number' ? windowMs : FLOW_WINDOW_MS
+      const current = num(now) || Date.now()
+      const cutoff = current - span
+      const list = Array.isArray(events) ? events : []
+      let eventsCount = 0
+      let tools = 0
+      let llms = 0
+      let errors = 0
+      let msSum = 0
+      let msCount = 0
+      let tokens = 0
+      for (let i = 0; i < list.length; i += 1) {
+        const event = list[i]
+        if (!event || typeof event !== 'object') continue
+        const at = num(event.t)
+        if (at > 0 && at < cutoff) continue
+        eventsCount += 1
+        const group = kindGroup(event.kind)
+        if (group === 'tool') tools += 1
+        if (group === 'llm') llms += 1
+        if (event.ok === false || event.level === 'error') errors += 1
+        const ms = num(event.ms)
+        if (ms > 0) {
+          msSum += ms
+          msCount += 1
+        }
+        const data = event.data && typeof event.data === 'object' ? event.data : null
+        const usage = data && data.usage && typeof data.usage === 'object' ? data.usage : null
+        if (usage) tokens += num(usage.input !== undefined ? usage.input : usage.promptTokens) + num(usage.output !== undefined ? usage.output : usage.completionTokens)
+      }
+      const minutes = span / 60000
+      const seconds = span / 1000
+      return {
+        eventsPerSec: eventsCount / Math.max(1, seconds),
+        toolCallsPerMin: tools / Math.max(0.0001, minutes),
+        llmCallsPerMin: llms / Math.max(0.0001, minutes),
+        tokensPerMin: tokens / Math.max(0.0001, minutes),
+        errorsPerMin: errors / Math.max(0.0001, minutes),
+        avgMs: msCount > 0 ? msSum / msCount : 0,
+      }
+    }
+
+    /** Compact first-paint timing label shown in the corner status block. */
+    function formatPaintTimings(firstFrameMs, detailMs, t) {
+      const first = num(firstFrameMs)
+      const detail = num(detailMs)
+      const parts = []
+      if (first > 0) parts.push(t('firstPaint') + ' ' + Math.round(first) + ' ms')
+      if (detail > 0) parts.push(t('detailPaint') + ' ' + Math.round(detail) + ' ms')
+      return parts.join(' · ')
+    }
+
+    /** Session id shown by the right-sidebar controller (string or object). */
+    function rightMountedSessionId(right) {
+      if (!right || !right.mounted || typeof right.mounted.getSnapshot !== 'function') return ''
+      const value = safe(function () { return right.mounted.getSnapshot() }, null)
+      if (typeof value === 'string') return value
+      if (value && typeof value === 'object') return String(value.id || value.sessionId || '')
+      return ''
+    }
+
+    /** Existing anatomy tab for this session (dedupe before openTab). */
+    function hasOpenAnatomyTab(openTabsSnapshot, sessionId, kind) {
+      const rows = Array.isArray(openTabsSnapshot) ? openTabsSnapshot : []
+      const wantedKind = String(kind || 'anatomy')
+      const wantedSession = String(sessionId || '')
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i]
+        if (!row || String(row.kind || '') !== wantedKind) continue
+        if (!wantedSession || String(row.sessionId || '') === wantedSession) return true
+      }
+      return false
+    }
+
+    /** Open (or focus) the architecture tab without multiplying tabs. */
+    function ensureAnatomyTab(right, kind) {
+      const wantedKind = String(kind || 'anatomy')
+      if (!right || typeof right.openTab !== 'function') return false
+      const sessionId = rightMountedSessionId(right)
+      let rows = []
+      try {
+        rows = right.openTabs && typeof right.openTabs.getSnapshot === 'function' ? right.openTabs.getSnapshot() : []
+      } catch (error) {
+        rows = []
+      }
+      if (hasOpenAnatomyTab(rows, sessionId, wantedKind)) {
+        const row = (rows || []).find(function (item) { return item && String(item.kind) === wantedKind && (!sessionId || String(item.sessionId) === sessionId) })
+        const tabId = row && (row.tabId || row.id)
+        if (tabId && typeof right.focus === 'function') {
+          try { right.focus(tabId) } catch (error) { /* ignore */ }
+        }
+        return false
+      }
+      try { right.openTab(wantedKind) } catch (error) { return false }
+      return true
+    }
+
     function readThemeColors() {
       const read = (name, fallback) => {
         const value = safe(() => {
@@ -2202,6 +2361,7 @@ window.__ModuleLoader__.load({
 
     const zh = {
       panel: '架构透视', title: 'DSH 架构透视 · 实时架构', stageLiveTag: '实时架构图',
+      openPanel: '在右侧栏打开架构透视', fullscreen: '全屏', recentCalls: '最近调用',
       connConnecting: '连接中', connLive: '实时在线', connReconnecting: '重连中', connOffline: '离线',
       pause: '暂停', resume: '继续', paused: '已暂停',
       events: '事件', totalEvents: '累计事件', domains: '组件域', components: '组件',
@@ -2281,6 +2441,8 @@ window.__ModuleLoader__.load({
       colorLlm: 'LLM', colorTool: '工具', colorSession: '会话', colorFs: '文件', colorApproval: '审批', colorError: '错误', colorPlugin: '插件',
       resizeDrawer: '拖拽调整详情栏宽度', argsResult: '参数与结果', argsPreview: '参数', resultPreview: '结果',
       back: '返回', backTools: '返回工具调用视图', backDomains: '返回组件域视图', backPrevious: '返回上一级',
+      allSessions: '全部会话', sessionFilter: '会话过滤', sessionBadge: '会话', currentSessionTag: '(当前)', clearSessionFilter: '清除会话过滤',
+      firstPaint: '首屏', detailPaint: '详情',
       latencyDist: '耗时分布 · 近 120s', latencyMin: '最小', latencyAvg: '平均', latencyP50: '中位', latencyMax: '最大',
       relatedLlmCalls: '相关 LLM 调用', timestamp: '时间戳', usageTokens: '令牌用量', tokensIn: '输入', tokensOut: '输出',
       kindFs: '文件', kindShell: '终端', kindWeb: '网络', kindAgent: '代理', kindUi: '界面',
@@ -2311,6 +2473,7 @@ window.__ModuleLoader__.load({
 
     const en = {
       panel: 'Architecture', title: 'DSH LIVE ARCHITECTURE · HUD', stageLiveTag: 'LIVE ARCHITECTURE',
+      openPanel: 'Open architecture in the right sidebar', fullscreen: 'Fullscreen', recentCalls: 'Recent calls',
       connConnecting: 'Connecting', connLive: 'Live', connReconnecting: 'Reconnecting', connOffline: 'Offline',
       pause: 'Pause', resume: 'Resume', paused: 'PAUSED',
       events: 'Events', totalEvents: 'Total events', domains: 'Domains', components: 'Components',
@@ -2390,6 +2553,8 @@ window.__ModuleLoader__.load({
       colorLlm: 'LLM', colorTool: 'tool', colorSession: 'session', colorFs: 'fs', colorApproval: 'approval', colorError: 'error', colorPlugin: 'plugin',
       resizeDrawer: 'Drag to resize the detail panel', argsResult: 'Arguments & result', argsPreview: 'Arguments', resultPreview: 'Result',
       back: 'Back', backTools: 'Back to tool-call view', backDomains: 'Back to domain view', backPrevious: 'Back one level',
+      allSessions: 'All sessions', sessionFilter: 'Session filter', sessionBadge: 'Session', currentSessionTag: '(current)', clearSessionFilter: 'Clear session filter',
+      firstPaint: 'First paint', detailPaint: 'Details',
       latencyDist: 'Latency distribution · last 120s', latencyMin: 'min', latencyAvg: 'avg', latencyP50: 'p50', latencyMax: 'max',
       relatedLlmCalls: 'Related LLM calls', timestamp: 'Timestamp', usageTokens: 'Token usage', tokensIn: 'input', tokensOut: 'output',
       kindFs: 'file', kindShell: 'terminal', kindWeb: 'network', kindAgent: 'agent', kindUi: 'ui',
@@ -2941,6 +3106,50 @@ window.__ModuleLoader__.load({
 .da-raw-desc[open] .da-when-closed { display: none; }
 .da-raw-desc[open] .da-when-open { display: inline; }
 .da-raw-desc .da-desc-full { display: block; margin: 0; max-height: none; height: auto; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; text-overflow: clip; -webkit-line-clamp: unset; -webkit-box-orient: initial; }
+
+.da-session-select { height: 26px; max-width: 220px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1, #22303e); background: var(--dsw-alias-bg-layer-2, #101a26); color: var(--dsw-alias-label-primary, #dff1ff); font-family: var(--da-mono); font-size: 10px; }
+.da-session-badge { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 4px 0 8px; border-radius: 999px; border: 1px solid rgba(62,232,255,0.35); color: rgba(190,240,255,0.9); font-family: var(--da-mono); font-size: 9.5px; white-space: nowrap; }
+.da-session-badge-clear { border: none; background: transparent; color: rgba(200,235,255,0.7); cursor: pointer; font-size: 12px; padding: 0 3px; }
+.da-session-badge-clear:hover { color: #eafaff; }
+
+/* right-sidebar anatomy tab (compact) */
+.da-rp-root { display: flex; flex-direction: column; gap: 8px; height: 100%; min-height: 0; padding: 10px; box-sizing: border-box; overflow: auto; color: var(--dsw-alias-label-primary, #dff1ff); background: var(--dsw-alias-bg-base, #0a111a); font-family: var(--da-font); }
+.da-rp-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; }
+.da-rp-title { font-size: 12px; font-weight: 700; letter-spacing: 0.03em; }
+.da-rp-session { height: 24px; max-width: 150px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1, #22303e); background: var(--dsw-alias-bg-layer-2, #101a26); color: var(--dsw-alias-label-primary, #dff1ff); font-family: var(--da-mono); font-size: 9.5px; }
+.da-rp-pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; border: 1px solid rgba(120,190,230,0.25); font-family: var(--da-mono); font-size: 9px; }
+.da-rp-pill .da-status-dot { width: 5px; height: 5px; border-radius: 50%; }
+.da-rp-pill.da-status-running { color: #9ff0c4; border-color: rgba(61,220,151,0.45); }
+.da-rp-pill.da-status-running .da-status-dot { background: #3ddc97; }
+.da-rp-pill.da-status-idleConnected { color: rgba(180,225,210,0.9); }
+.da-rp-pill.da-status-idleConnected .da-status-dot { background: #3ddc97; opacity: 0.75; }
+.da-rp-pill.da-status-paused { color: rgba(200,210,225,0.85); }
+.da-rp-pill.da-status-waiting { color: rgba(160,180,200,0.8); }
+.da-rp-pill.da-status-offline { color: #ff8a90; }
+.da-rp-pill.da-status-reconnecting { color: #ffc04d; }
+.da-rp-spacer { flex: 1 1 auto; }
+.da-rp-btn { height: 22px; padding: 0 7px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1, #22303e); background: rgba(20,38,54,0.6); color: var(--dsw-alias-label-primary, #dff1ff); font-family: var(--da-mono); font-size: 9.5px; cursor: pointer; }
+.da-rp-btn:hover { border-color: rgba(62,232,255,0.45); }
+.da-rp-wait { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 160px; border: 1px dashed rgba(120,190,230,0.22); border-radius: 8px; color: var(--dsw-alias-label-secondary, #8fa3b8); font-size: 11px; }
+.da-rp-stage { position: relative; flex: none; width: 100%; border: 1px solid rgba(120,190,230,0.16); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-2, #101a26); }
+.da-rp-stage svg { display: block; width: 100%; height: auto; }
+.da-rp-tip { position: absolute; right: 6px; bottom: 4px; font-family: var(--da-mono); font-size: 8.5px; color: var(--dsw-alias-label-secondary, #8fa3b8); opacity: 0.8; pointer-events: none; }
+.da-rp-detail { flex: none; border: 1px solid rgba(120,190,230,0.18); border-radius: 7px; padding: 6px 8px; background: var(--dsw-alias-bg-layer-2, #101a26); font-size: 10px; }
+.da-rp-detail-head { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; }
+.da-rp-detail-desc { margin-top: 3px; color: var(--dsw-alias-label-secondary, #8fa3b8); font-size: 9.5px; line-height: 1.5; }
+.da-rp-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; flex: none; }
+.da-rp-metric { border: 1px solid rgba(120,190,230,0.14); border-radius: 6px; padding: 5px 6px; background: rgba(14,26,38,0.6); min-width: 0; }
+.da-rp-metric-label { font-family: var(--da-mono); font-size: 8px; color: var(--dsw-alias-label-secondary, #8fa3b8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.da-rp-metric-value { font-family: var(--da-mono); font-size: 13px; font-weight: 600; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.da-rp-recent { flex: none; display: flex; flex-direction: column; gap: 3px; }
+.da-rp-recent-title { font-size: 9px; font-family: var(--da-mono); color: var(--dsw-alias-label-secondary, #8fa3b8); }
+.da-rp-recent-row { display: flex; align-items: center; gap: 6px; font-size: 9.5px; padding: 2px 0; border-bottom: 1px solid rgba(120,190,230,0.08); min-width: 0; }
+.da-rp-recent-kind { flex: none; font-family: var(--da-mono); font-size: 8.5px; opacity: 0.8; }
+.da-rp-recent-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.da-rp-recent-time { flex: none; font-family: var(--da-mono); font-size: 8.5px; opacity: 0.7; }
+.da-open-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--dsw-alias-label-secondary, #8fa3b8); cursor: pointer; }
+.da-open-btn:hover { background: var(--dsw-alias-bg-layer-2, rgba(120,190,230,0.14)); color: var(--dsw-alias-label-primary, #dff1ff); }
+.da-tab-title { display: inline-flex; align-items: center; gap: 5px; }
 
 /* error boundary */
 .da-error { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; background: var(--dsw-alias-bg-base, #060b12); }
@@ -4197,6 +4406,34 @@ window.__ModuleLoader__.load({
           )
         ),
         h(ViewSwitch, { t: t, view: props.view, onView: props.onView }),
+        props.sessions && props.sessions.length > 0 ? h('select', {
+          className: 'da-session-select',
+          value: props.sessionFilter || '',
+          title: t('sessionFilter'),
+          'aria-label': t('sessionFilter'),
+          onChange: function (event) {
+            if (typeof props.onSessionFilter === 'function') props.onSessionFilter(event && event.target ? event.target.value : '')
+          },
+        },
+          h('option', { value: '' }, t('allSessions')),
+          props.sessions.map(function (session) {
+            return h('option', { key: 'sess:' + session.id, value: session.id },
+              String(session.title || String(session.id).slice(0, 8)) + (session.active ? ' ' + t('currentSessionTag') : ''))
+          })
+        ) : null,
+        props.sessionFilter ? (() => {
+          let title = String(props.sessionFilter).slice(0, 8)
+          const list = props.sessions || []
+          for (let i = 0; i < list.length; i += 1) if (list[i].id === props.sessionFilter) title = list[i].title || title
+          return h('span', { className: 'da-session-badge', title: t('sessionBadge') + ': ' + title },
+            t('sessionBadge') + ': ' + title,
+            h('button', {
+              type: 'button', className: 'da-session-badge-clear',
+              onClick: function () { if (typeof props.onSessionFilter === 'function') props.onSessionFilter('') },
+              title: t('clearSessionFilter'), 'aria-label': t('clearSessionFilter'),
+            }, '×')
+          )
+        })() : null,
         h('div', { className: 'da-spacer' }),
         h('span', { className: 'da-status ' + statusClass, role: 'status' },
           h('span', { className: 'da-dot da-dot-pulse', style: { color: statusColor } }),
@@ -4540,15 +4777,14 @@ window.__ModuleLoader__.load({
         ? String(selection.from || '') + '>' + String(selection.to || '')
         : ''
       const sideSeen = Object.create(null)
-      const gutterUse = Object.create(null)
       const drawable = []
       for (let i = 0; i < defs.length; i += 1) {
         const def = defs[i]
         const row = def.row
         const reverseKey = row.to + '>' + row.from
         const bidirectional = !!seenKey[reverseKey]
-        // Two independent curves: whole-curve normal offset (±20) plus separate anchors.
-        const lane = bidirectional ? (def.key < reverseKey ? -20 : 20) : 0
+        // Simple diagrams.net-style single curve: bidirectional ±16, same-direction ±8 stagger.
+        const lane = bidirectional ? (def.key < reverseKey ? -16 : 16) : 0
         const fromBucket = 'f:' + row.from + ':' + def.fromSide
         const toBucket = 't:' + row.to + ':' + def.toSide
         const fromIndex = sideSeen[fromBucket] || 0
@@ -4557,30 +4793,12 @@ window.__ModuleLoader__.load({
         sideSeen[toBucket] = toIndex + 1
         const fromOffsets = spreadOffsets(sideCounts[fromBucket], sideSpan(def.fromSide))
         const toOffsets = spreadOffsets(sideCounts[toBucket], sideSpan(def.toSide))
-        const fromSpread = bidirectional ? (fromOffsets[fromIndex] || 0) * 0.3 : (fromOffsets[fromIndex] || 0)
-        const toSpread = bidirectional ? (toOffsets[toIndex] || 0) * 0.3 : (toOffsets[toIndex] || 0)
-        const start = sideAnchor(def.fromNode, def.fromSide, clampSideOffset(def.fromSide, fromSpread + lane))
-        const end = sideAnchor(def.toNode, def.toSide, clampSideOffset(def.toSide, toSpread + lane))
-        const obstacles = buildObstacles(nodes, 6, [row.from, row.to])
-        const colA = columnIndexOf(def.fromNode)
-        const colB = columnIndexOf(def.toNode)
-        const colDiff = Math.abs(colB - colA)
-        let route = null
-        if (colDiff === 0) {
-          route = laneRouteSameColumn(start, def.fromSide, end, def.toSide)
-        } else if (colDiff === 1) {
-          route = laneRouteAdjacent(start, def.fromSide, end, def.toSide)
-        } else {
-          const gutterX = gutterBetween(start, end, colA, colB)
-          const laneKey = String(gutterX)
-          gutterUse[laneKey] = (gutterUse[laneKey] || 0) + 1
-          route = gutterRoute(start, def.fromSide, end, def.toSide, gutterX, gutterUse[laneKey])
-        }
-        // Lane routing is tidy by default; fall back to obstacle avoidance only
-        // when the lane route would still cross a node card.
-        if (pathIntersectsRects(route, obstacles)) {
-          route = chooseEdgeRoute(start, end, obstacles, 0, bidirectional, def.fromSide, def.toSide)
-        }
+        const spreadScale = bidirectional ? 0.3 : 1
+        const fromStagger = (!bidirectional && sideCounts[fromBucket] > 1) ? (((fromIndex % 2) * 2 - 1) * 8) : 0
+        const toStagger = (!bidirectional && sideCounts[toBucket] > 1) ? (((toIndex % 2) * 2 - 1) * 8) : 0
+        const start = sideAnchor(def.fromNode, def.fromSide, clampSideOffset(def.fromSide, (fromOffsets[fromIndex] || 0) * spreadScale + lane + fromStagger))
+        const end = sideAnchor(def.toNode, def.toSide, clampSideOffset(def.toSide, (toOffsets[toIndex] || 0) * spreadScale + lane + toStagger))
+        const route = simpleEdgeRoute(start, end)
         const count = num(row.count)
         drawable.push({
           def: def, row: row, route: route, count: count,
@@ -4865,7 +5083,7 @@ window.__ModuleLoader__.load({
           if (other.id === edge.domain) continue
           obstacles.push(rectOfNode(other, 6))
         }
-        const route = cubicRouteForSides(start, 'right', end, 'left', 0)
+        const route = simpleEdgeRoute(start, end)
         const traitGroups = Object.create(null)
         if (edge.kinds && typeof edge.kinds === 'object') {
           const kindKeys = Object.keys(edge.kinds)
@@ -5611,6 +5829,9 @@ window.__ModuleLoader__.load({
         now: nowTick,
       })
       const lastEventLabel = formatLastEventLabel(props.lastEventAt, nowTick, t)
+      React.useEffect(function stageReadySignal() {
+        if (typeof props.onStageReady === 'function') props.onStageReady()
+      }, [])
       const stageRef = React.useRef(null)
       const dragRef = React.useRef(null)
       const movedRef = React.useRef(false)
@@ -5723,6 +5944,9 @@ window.__ModuleLoader__.load({
               fmtNum(props.eventCount || 0) + ' ' + t('hudRecent') + ' · ' + fmtNum(activeLinks) + ' ' + t('hudLinks')),
             h('div', { className: 'da-hud-line' },
               t('statusLastEvent') + '：' + lastEventLabel),
+            formatPaintTimings(props.firstFrameMs, props.detailMs, t)
+              ? h('div', { className: 'da-hud-line' }, formatPaintTimings(props.firstFrameMs, props.detailMs, t))
+              : null,
             props.snapshotLite
               ? h('div', { className: 'da-hud-hint' }, t('statusLoadingDetails'))
               : (emptyTraffic
@@ -7390,6 +7614,13 @@ window.__ModuleLoader__.load({
       const [isDark, setIsDark] = React.useState(function () { return resolveThemeDark(props.anatomyTheme) })
       const [snapshotLite, setSnapshotLite] = React.useState(false)
       const [lastEventAt, setLastEventAt] = React.useState(0)
+      const [sessionFilter, setSessionFilter] = React.useState('')
+      const [firstFrameMs, setFirstFrameMs] = React.useState(0)
+      const [detailMs, setDetailMs] = React.useState(0)
+      const [stageReady, setStageReady] = React.useState(false)
+      const [panelsReady, setPanelsReady] = React.useState(function () {
+        return typeof requestAnimationFrame !== 'function'
+      })
 
       const rootRef = React.useRef(null)
       const selectionRef = React.useRef(null)
@@ -7406,6 +7637,7 @@ window.__ModuleLoader__.load({
       const prevWidthRef = React.useRef(0)
       const snapshotStateRef = React.useRef({ snapshot: null, fullSnapshot: false, lite: false })
       const lastEventAtRef = React.useRef(0)
+      const mountAtRef = React.useRef(Date.now())
 
       const flushNow = React.useCallback(function flushNow() {
         if (!mountedRef.current) return
@@ -7675,6 +7907,31 @@ window.__ModuleLoader__.load({
       }, [])
 
       const zh = isZhLocale(t)
+      const sessionList = React.useMemo(function () {
+        return deriveSessions(snapshot, events)
+      }, [snapshot, events])
+      React.useEffect(function fallbackSessionFilter() {
+        if (!sessionFilter) return
+        let found = false
+        for (let i = 0; i < sessionList.length; i += 1) if (sessionList[i].id === sessionFilter) { found = true; break }
+        if (!found) setSessionFilter('')
+      }, [sessionFilter, sessionList])
+      const filteredEvents = React.useMemo(function () {
+        return filterEventsBySession(events, sessionFilter)
+      }, [events, sessionFilter, flowTick])
+      const sessionLive = React.useMemo(function () {
+        return deriveSessionMetrics(filteredEvents, FLOW_WINDOW_MS)
+      }, [filteredEvents, flowTick])
+      const effectiveLive = sessionFilter ? sessionLive : live
+      const recentEventCount = React.useMemo(function () {
+        const cutoff = Date.now() - FLOW_WINDOW_MS
+        let total = 0
+        for (let i = 0; i < filteredEvents.length; i += 1) {
+          const at = num(filteredEvents[i] && filteredEvents[i].t)
+          if (!(at > 0) || at >= cutoff) total += 1
+        }
+        return total
+      }, [filteredEvents, flowTick])
       const nodes = React.useMemo(function () {
         const views = nodeViews(snapshot && snapshot.organs ? snapshot.organs : null)
         const examples = buildNodeExamples(snapshot)
@@ -7683,11 +7940,11 @@ window.__ModuleLoader__.load({
       }, [snapshot])
       const runtime = snapshot && snapshot.runtime && typeof snapshot.runtime === 'object' ? snapshot.runtime : null
       const flows = React.useMemo(function () {
-        return computeFlows(events, FLOW_WINDOW_MS)
-      }, [events, flowTick])
+        return computeFlows(filteredEvents, FLOW_WINDOW_MS)
+      }, [filteredEvents, flowTick])
       const toolFlows = React.useMemo(function () {
-        return computeToolFlows(events, snapshot && Array.isArray(snapshot.tools) ? snapshot.tools : [], FLOW_WINDOW_MS)
-      }, [events, flowTick, snapshot])
+        return computeToolFlows(filteredEvents, snapshot && Array.isArray(snapshot.tools) ? snapshot.tools : [], FLOW_WINDOW_MS)
+      }, [filteredEvents, flowTick, snapshot])
       const toolNodes = React.useMemo(function () {
         return buildToolView(snapshot, toolFlows)
       }, [snapshot, toolFlows])
@@ -7695,10 +7952,10 @@ window.__ModuleLoader__.load({
       const activeKey = activeNode ? String(activeNode.type) + ':' + String(activeNode.id) : ''
       const callDetailRows = React.useMemo(function () {
         if (!activeNode) return []
-        if (activeNode.type === 'domain') return computeDomainCallDetail(events, activeNode.id, FLOW_WINDOW_MS, 8)
+        if (activeNode.type === 'domain') return computeDomainCallDetail(filteredEvents, activeNode.id, FLOW_WINDOW_MS, 8)
         if (activeNode.type === 'tool') return computeToolCallDetail(toolFlows, activeNode.id, zh, 6)
         return []
-      }, [activeKey, events, flowTick, toolFlows, zh])
+      }, [activeKey, filteredEvents, flowTick, toolFlows, zh])
       const callDetailTitle = React.useMemo(function () {
         if (!activeNode) return ''
         const prefix = t('callDetailTitle')
@@ -7839,6 +8096,35 @@ window.__ModuleLoader__.load({
         setPaused(function (previous) { return !previous })
       }, [])
 
+      // First-paint timing: panel mount → stage first frame, and → full snapshot.
+      const onStageReady = React.useCallback(function () {
+        setFirstFrameMs(function (previous) {
+          return previous > 0 ? previous : Math.max(1, Date.now() - mountAtRef.current)
+        })
+        setStageReady(true)
+      }, [])
+
+      React.useEffect(function detailTiming() {
+        if (!snapshot || snapshotLite) return
+        setDetailMs(function (previous) {
+          return previous > 0 ? previous : Math.max(1, Date.now() - mountAtRef.current)
+        })
+      }, [snapshot, snapshotLite])
+
+      React.useEffect(function deferredPanels() {
+        if (!stageReady || snapshotLite) {
+          setPanelsReady(false)
+          return undefined
+        }
+        let handle = 0
+        if (typeof requestAnimationFrame === 'function') {
+          handle = requestAnimationFrame(function () { setPanelsReady(true) })
+          return function () { cancelAnimationFrame(handle) }
+        }
+        handle = setTimeout(function () { setPanelsReady(true) }, 16)
+        return function () { clearTimeout(handle) }
+      }, [stageReady, snapshotLite])
+
       const narrow = pageWidth > 0 && pageWidth < 1100
       const veryNarrow = pageWidth > 0 && pageWidth < 900
 
@@ -7848,10 +8134,12 @@ window.__ModuleLoader__.load({
       },
         h('style', null, CSS_TEXT),
         h(Header, {
-          t: t, conn: conn, paused: paused, runtime: runtime, eventCount: eventTotal,
+          t: t, conn: conn, paused: paused, runtime: runtime, eventCount: filteredEvents.length,
           railCollapsed: railCollapsed, drawerCollapsed: drawerCollapsed,
           view: view, onView: setViewMode, helpOpen: helpOpen, onHelp: toggleHelp,
           onTogglePause: togglePause,
+          sessions: sessionList, sessionFilter: sessionFilter,
+          onSessionFilter: function (next) { setSessionFilter(String(next || '')) },
           onToggleRail: function () { setRailCollapsed(function (previous) { return !previous }) },
           onToggleDrawer: function () { setDrawerCollapsed(function (previous) { return !previous }) },
         }),
@@ -7865,8 +8153,9 @@ window.__ModuleLoader__.load({
           h(Stage, {
             t: t, zh: zh, nodes: nodes, heat: heat, flows: flows, selection: selection,
             snapshot: snapshot, theme: props.anatomyTheme, apiRef: apiRef, paused: paused,
-            eventCount: eventTotal, view: view, toolNodes: toolNodes, toolFlows: toolFlows, conn: conn,
+            eventCount: recentEventCount, view: view, toolNodes: toolNodes, toolFlows: toolFlows, conn: conn,
             snapshotLite: snapshotLite, lastEventAt: lastEventAt,
+            firstFrameMs: firstFrameMs, detailMs: detailMs,
             hover: hover, callRows: callDetailRows, callTitle: callDetailTitle, callTotal: callDetailTotal,
             callActive: callActive, hoverEdge: hoveredEdge,
             onSelectDomain: selectDomain, onSelectTool: selectTool,
@@ -7874,9 +8163,10 @@ window.__ModuleLoader__.load({
             onSelectEdge: selectEdge, onHoverEdge: setHoveredEdgeSafe,
             onView: setViewMode,
             onClearSelection: clearSelection,
+            onStageReady: onStageReady,
           }),
-          h(DetailDrawer, {
-            t: t, zh: zh, snapshot: snapshot, events: events, live: live, orgMetrics: orgMetrics,
+          panelsReady ? h(DetailDrawer, {
+            t: t, zh: zh, snapshot: snapshot, events: filteredEvents, live: effectiveLive, orgMetrics: orgMetrics,
             toolMetrics: toolMetrics, diag: diag, nodes: nodes, heat: heat, flows: flows, toolFlows: toolFlows,
             selection: selection, collapsed: drawerCollapsed, isDark: isDark,
             onSelect: selectAny, onSelectEvent: selectEvent, onClear: clearSelection,
@@ -7886,18 +8176,18 @@ window.__ModuleLoader__.load({
             historyDepth: historyDepth,
             breadcrumb: selectionBreadcrumb(selection, view, t),
             backLabel: selectionBackLabel(selection, view, historyDepth, t),
-          })
+          }) : null
         ),
-        h(BottomConsole, {
-          t: t, zh: zh, tab: tab, snapshot: snapshot, events: events, live: live, spark: spark,
+        panelsReady ? h(BottomConsole, {
+          t: t, zh: zh, tab: tab, snapshot: snapshot, events: filteredEvents, live: effectiveLive, spark: spark,
           toolMetrics: toolMetrics, selection: selection, componentQuery: componentQuery,
-          autoScroll: autoScroll, eventTotal: eventTotal, conn: conn,
+          autoScroll: autoScroll, eventTotal: filteredEvents.length, conn: conn,
           filterQuery: logFilter.query, filterGroup: logFilter.group, filterNonce: logFilter.nonce,
           onTab: function (next) { setTab(next) },
           onComponentQuery: function (value) { setComponentQuery(String(value || '')) },
           onToggleAutoScroll: function (next) { setAutoScroll(next === true) },
           onSelect: selectAny,
-        }),
+        }) : null,
         h(HelpOverlay, { t: t, open: helpOpen, onClose: function () { setHelpOpen(false) } })
       )
     }
@@ -7948,6 +8238,275 @@ window.__ModuleLoader__.load({
       }
     }
 
+    const ANATOMY_TAB_ID = 'dsh-anatomy:architecture'
+    const ANATOMY_TAB_KIND = 'anatomy'
+    const RIGHT_RECENT_LIMIT = 5
+
+    /** Small inline architecture glyph (header button + tab title). */
+    function ArchitectureGlyph(props) {
+      const size = props && props.size ? num(props.size) : 15
+      return h('svg', { width: size, height: size, viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' },
+        h('rect', { x: 1.5, y: 2, width: 4.2, height: 4, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.1 }),
+        h('rect', { x: 10.3, y: 2, width: 4.2, height: 4, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.1 }),
+        h('rect', { x: 5.9, y: 10, width: 4.2, height: 4, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.1 }),
+        h('path', { d: 'M5.7 4h4.6M3.6 6v3.2h4.4M12.4 6v3.2H8', fill: 'none', stroke: 'currentColor', strokeWidth: 1.1, strokeLinecap: 'round' })
+      )
+    }
+
+    /** Session-header corner button: open/refocus the architecture tab. */
+    function OpenButton(props) {
+      const t = props && typeof props.t === 'function' ? props.t : fallbackT
+      const right = props && props.sidebarRight ? props.sidebarRight : null
+      return h('button', {
+        type: 'button',
+        className: 'da-open-btn',
+        title: t('openPanel'),
+        'aria-label': t('openPanel'),
+        onClick: function () { ensureAnatomyTab(right, ANATOMY_TAB_KIND) },
+      }, h(ArchitectureGlyph, { size: 15 }))
+    }
+
+    /** Chip title for the right-sidebar tab (icon + label). */
+    function AnatomyTabTitle(props) {
+      const t = props && typeof props.t === 'function' ? props.t : fallbackT
+      return h('span', { className: 'da-tab-title' }, h(ArchitectureGlyph, { size: 13 }), t('panel'))
+    }
+
+    /** Presentational compact right-sidebar panel (harness-renderable). */
+    function CompactPanelView(props) {
+      const t = props.t || fallbackT
+      const zh = props.zh !== false
+      const compact = props.compact !== false
+      const events = Array.isArray(props.events) ? props.events : []
+      const nodes = Array.isArray(props.nodes) ? props.nodes : []
+      const flows = props.flows && typeof props.flows === 'object' ? props.flows : { pairs: {}, nodes: {} }
+      const sessions = Array.isArray(props.sessions) ? props.sessions : []
+      const metrics = props.metrics && typeof props.metrics === 'object' ? props.metrics : {}
+      const status = props.status && typeof props.status === 'object' ? props.status : { key: 'waiting', labelKey: 'statusWaiting' }
+      const selected = props.selectedDomain ? nodes.find(function (node) { return node.id === props.selectedDomain }) : null
+      const recent = events.slice(-RIGHT_RECENT_LIMIT).reverse()
+      const sessionTitleOf = function (id) {
+        for (let i = 0; i < sessions.length; i += 1) if (sessions[i].id === id) return sessions[i].title || String(id).slice(0, 8)
+        return String(id || '').slice(0, 8)
+      }
+      const stage = props.snapshot
+        ? h('div', { className: 'da-rp-stage' },
+            h(ArchitectureSvg, {
+              t: t, zh: zh, nodes: nodes, heat: {}, flows: flows, selection: selected ? { type: 'domain', id: selected.id } : null,
+              snapshot: props.snapshot, viewBox: '0 0 ' + VIEW_W + ' ' + VIEW_H,
+              hoverId: null, hoverEdgeKey: null, apiRef: null, paused: false,
+              onSelectDomain: function (id) { if (typeof props.onSelectDomain === 'function') props.onSelectDomain(id) },
+              onHoverDomain: function () {},
+              onSelectEdge: function () {},
+              onHoverEdge: function () {},
+              onView: function () {},
+            }),
+            props.snapshotLite ? h('div', { className: 'da-rp-tip' }, t('statusLoadingDetails')) : null
+          )
+        : h('div', { className: 'da-rp-wait' }, h('span', { className: 'da-spin' }), t('connectingDataStream'))
+      return h('div', { className: 'da-rp-root' + (compact ? ' da-rp-compact' : '') },
+        h('style', null, CSS_TEXT),
+        h('div', { className: 'da-rp-top' },
+          h('span', { className: 'da-rp-title' }, t('panel')),
+          sessions.length > 0 ? h('select', {
+            className: 'da-rp-session',
+            value: props.sessionId || '',
+            title: t('sessionFilter'),
+            'aria-label': t('sessionFilter'),
+            onChange: function (event) {
+              if (typeof props.onSession === 'function') props.onSession(event && event.target ? event.target.value : '')
+            },
+          },
+            h('option', { value: '' }, t('allSessions')),
+            sessions.map(function (session) {
+              return h('option', { key: 'rp:' + session.id, value: session.id }, session.title || String(session.id).slice(0, 8))
+            })
+          ) : null,
+          h('span', { className: 'da-rp-pill da-status-' + status.key },
+            h('span', { className: 'da-status-dot' }),
+            t(status.labelKey || 'statusWaiting')
+          ),
+          h('span', { className: 'da-rp-spacer' }),
+          typeof props.onFullscreen === 'function' ? h('button', {
+            type: 'button', className: 'da-rp-btn', onClick: props.onFullscreen, title: t('fullscreen'),
+          }, t('fullscreen')) : null
+        ),
+        stage,
+        selected ? h('div', { className: 'da-rp-detail' },
+          h('div', { className: 'da-rp-detail-head' },
+            h('span', null, domainTitle(selected, zh)),
+            h('span', { className: 'da-rp-recent-kind' }, String(selected.plugins.length) + 'p · ' + String(selected.services.length) + 's · ' + String(selected.tools.length) + 't'),
+            h('span', { className: 'da-rp-spacer' }),
+            h('button', { type: 'button', className: 'da-rp-btn', onClick: function () { if (typeof props.onSelectDomain === 'function') props.onSelectDomain('') } }, '×')
+          ),
+          h('div', { className: 'da-rp-detail-desc' }, domainDesc(selected, zh))
+        ) : null,
+        h('div', { className: 'da-rp-metrics' },
+          h('div', { className: 'da-rp-metric' },
+            h('div', { className: 'da-rp-metric-label' }, t('eventsPerSec')),
+            h('div', { className: 'da-rp-metric-value' }, fmtNum(metrics.eventsPerSec) + '/s')),
+          h('div', { className: 'da-rp-metric' },
+            h('div', { className: 'da-rp-metric-label' }, t('toolCallsPerMin')),
+            h('div', { className: 'da-rp-metric-value' }, fmtNum(metrics.toolCallsPerMin) + '/min')),
+          h('div', { className: 'da-rp-metric' },
+            h('div', { className: 'da-rp-metric-label' }, t('tokensPerMin')),
+            h('div', { className: 'da-rp-metric-value' }, fmtNum((metrics.tokensPerMin || 0) / 60) + '/s')),
+          h('div', { className: 'da-rp-metric' },
+            h('div', { className: 'da-rp-metric-label' }, t('avgMs')),
+            h('div', { className: 'da-rp-metric-value' }, fmtMs(metrics.avgMs)))
+        ),
+        h('div', { className: 'da-rp-recent' },
+          h('div', { className: 'da-rp-recent-title' }, t('recentCalls') + ' · ' + (props.sessionId ? sessionTitleOf(props.sessionId) : t('allSessions'))),
+          recent.length === 0
+            ? h('div', { className: 'da-rp-recent-row', style: { opacity: 0.65 } }, t('emptyTraffic'))
+            : recent.map(function (event, index) {
+                const label = event.label || (event.data && event.data.tool) || event.target || event.organ || ''
+                return h('div', { className: 'da-rp-recent-row', key: 'rp-ev:' + (event.id !== undefined ? event.id : index) },
+                  h('span', { className: 'da-rp-recent-kind' }, localizedKind(event.kind, t)),
+                  h('span', { className: 'da-rp-recent-text', title: String(label) }, String(label)),
+                  h('span', { className: 'da-rp-recent-time' }, fmtClock(event.t))
+                )
+              })
+        )
+      )
+    }
+
+    /**
+     * Data wrapper for the right-sidebar tab: one independent stream, the
+     * session follow/default filter and the derived compact view.
+     */
+    function RightPanel(props) {
+      const t = props && typeof props.t === 'function' ? props.t : fallbackT
+      const right = props && props.sidebarRight ? props.sidebarRight : null
+      const [snapshot, setSnapshot] = React.useState(null)
+      const [events, setEvents] = React.useState([])
+      const [conn, setConn] = React.useState('connecting')
+      const [lastEventAt, setLastEventAt] = React.useState(0)
+      const [snapshotLite, setSnapshotLite] = React.useState(false)
+      const [sessionId, setSessionId] = React.useState(function () { return rightMountedSessionId(right) })
+      const [selectedDomain, setSelectedDomain] = React.useState('')
+      const [nowTick, setNowTick] = React.useState(function () { return Date.now() })
+      const mountedRef = React.useRef(true)
+      const eventsRef = React.useRef([])
+      const lastEventIdRef = React.useRef(-1)
+      const snapshotStateRef = React.useRef({ snapshot: null, fullSnapshot: false, lite: false })
+      const flushTimerRef = React.useRef(0)
+      const manualSessionRef = React.useRef(false)
+
+      React.useEffect(function mountRightController() {
+        mountedRef.current = true
+        const controller = createController({
+          onConn: function (next) { if (mountedRef.current) setConn(next) },
+          onSnapshot: function (snap) {
+            if (!mountedRef.current || !snap || typeof snap !== 'object') return
+            const applied = applySnapshotState(snapshotStateRef.current, snap)
+            snapshotStateRef.current = applied.state
+            if (!applied.changed) return
+            setSnapshot(applied.state.snapshot)
+            setSnapshotLite(applied.state.lite === true && applied.state.fullSnapshot !== true)
+          },
+          onEvents: function (frame) {
+            if (!mountedRef.current || !frame || typeof frame !== 'object') return
+            const incoming = Array.isArray(frame.events) ? frame.events : []
+            const list = eventsRef.current
+            let added = 0
+            for (let i = 0; i < incoming.length; i += 1) {
+              const event = incoming[i]
+              if (!event || typeof event !== 'object') continue
+              const id = Number(event.id)
+              if (Number.isFinite(id)) {
+                if (id <= lastEventIdRef.current) continue
+                lastEventIdRef.current = id
+              }
+              list.push(event)
+              added += 1
+            }
+            if (added === 0) return
+            if (list.length > MAX_EVENTS + 100) list.splice(0, list.length - MAX_EVENTS)
+            setLastEventAt(Date.now())
+            if (flushTimerRef.current) return
+            flushTimerRef.current = setTimeout(function () {
+              flushTimerRef.current = 0
+              if (mountedRef.current) setEvents(eventsRef.current.slice())
+            }, 120)
+          },
+        })
+        controller.start()
+        return function unmountRightController() {
+          mountedRef.current = false
+          try { controller.dispose() } catch (error) { /* ignore */ }
+          if (flushTimerRef.current) clearTimeout(flushTimerRef.current)
+          flushTimerRef.current = 0
+        }
+      }, [])
+
+      React.useEffect(function followMountedSession() {
+        if (!right || !right.mounted || typeof right.mounted.subscribe !== 'function') return undefined
+        let off = null
+        try {
+          off = right.mounted.subscribe(function () {
+            if (!mountedRef.current || manualSessionRef.current) return
+            setSessionId(rightMountedSessionId(right))
+          })
+        } catch (error) {
+          off = null
+        }
+        return function () { if (typeof off === 'function') { try { off() } catch (error) { /* ignore */ } } }
+      }, [right])
+
+      React.useEffect(function rightClock() {
+        const timer = setInterval(function () { if (mountedRef.current) setNowTick(Date.now()) }, 1000)
+        return function () { clearInterval(timer) }
+      }, [])
+
+      const sessions = React.useMemo(function () {
+        return deriveSessions(snapshot, events)
+      }, [snapshot, events])
+      const filteredEvents = React.useMemo(function () {
+        return filterEventsBySession(events, sessionId)
+      }, [events, sessionId])
+      React.useEffect(function fallbackRightSession() {
+        if (!sessionId) return
+        if (sessions.length === 0) return
+        let found = false
+        for (let i = 0; i < sessions.length; i += 1) if (sessions[i].id === sessionId) { found = true; break }
+        if (!found) {
+          manualSessionRef.current = false
+          setSessionId(rightMountedSessionId(right) || '')
+        }
+      }, [sessionId, sessions, right])
+      const nodes = React.useMemo(function () {
+        const views = nodeViews(snapshot && snapshot.organs ? snapshot.organs : null)
+        const examples = buildNodeExamples(snapshot)
+        for (let i = 0; i < views.length; i += 1) views[i].examples = examples[views[i].id] || []
+        return views
+      }, [snapshot])
+      const flows = React.useMemo(function () {
+        return computeFlows(filteredEvents, FLOW_WINDOW_MS)
+      }, [filteredEvents])
+      const metrics = React.useMemo(function () {
+        return deriveSessionMetrics(filteredEvents, FLOW_WINDOW_MS)
+      }, [filteredEvents])
+      const status = deriveRuntimeStatus({
+        snapshot: snapshot, paused: false, conn: conn, lastEventAt: lastEventAt, now: nowTick,
+      })
+      return h(CompactPanelView, {
+        t: t, zh: true, snapshot: snapshot, snapshotLite: snapshotLite, events: filteredEvents,
+        nodes: nodes, flows: flows, sessions: sessions, sessionId: sessionId, selectedDomain: selectedDomain,
+        status: status, metrics: metrics,
+        onSession: function (next) {
+          manualSessionRef.current = true
+          setSessionId(String(next || ''))
+        },
+        onSelectDomain: function (id) {
+          setSelectedDomain(function (previous) { return previous === id ? '' : String(id || '') })
+        },
+        onFullscreen: right && typeof right.toggleFullscreen === 'function'
+          ? function () { try { right.toggleFullscreen() } catch (error) { /* not focused yet */ } }
+          : null,
+      })
+    }
+
     /** Slot component rendered by the layout's keyed `main` seat. */
     function AnatomyPage(props) {
       const t = props && typeof props.t === 'function' ? props.t : fallbackT
@@ -7989,6 +8548,62 @@ window.__ModuleLoader__.load({
         locale: NS,
         inject: () => ({ t, anatomyTheme }),
       }, AnatomyPage))
+
+      // 3) Optional conversation right-sidebar tab. Both services must exist;
+      //    they are never added to `inject` so older hosts keep working.
+      const sidebarRightTabs = safe(function () {
+        return typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : null
+      }, null)
+      const sidebarRight = safe(function () {
+        return typeof ctx.get === 'function' ? ctx.get('sidebarRight') : null
+      }, null)
+      const canUseRightSidebar = !!(sidebarRightTabs && typeof sidebarRightTabs.register === 'function'
+        && sidebarRight && typeof sidebarRight.openTab === 'function')
+      if (canUseRightSidebar) {
+        ctx.effect(function registerAnatomyTabType() {
+          try {
+            return sidebarRightTabs.register({
+              id: ANATOMY_TAB_ID,
+              kind: ANATOMY_TAB_KIND,
+              keepMounted: true,
+              title: function () { return t('panel') },
+            })
+          } catch (error) {
+            return function () {}
+          }
+        }, 'dsh-anatomy: right tab type')
+        ctx.effect(function registerAnatomyTabBody() {
+          return ctx.slots.inject('sidebar.right.pane.tab', function () {
+            return ctx.slots.register({
+              name: 'sidebar.right.pane.tab',
+              key: ANATOMY_TAB_ID,
+              locale: NS,
+              inject: function () { return { t: t, anatomyTheme: anatomyTheme, sidebarRight: sidebarRight } },
+            }, RightPanel)
+          })
+        }, 'dsh-anatomy: right tab body')
+        ctx.effect(function registerAnatomyTabTitle() {
+          return ctx.slots.inject('sidebar.right.pane.tab.title', function () {
+            return ctx.slots.register({
+              name: 'sidebar.right.pane.tab.title',
+              key: ANATOMY_TAB_ID,
+              locale: NS,
+              inject: function () { return { t: t } },
+            }, AnatomyTabTitle)
+          })
+        }, 'dsh-anatomy: right tab title')
+        ctx.effect(function registerAnatomyOpenButton() {
+          return ctx.slots.inject('conversation.session.header.corner', function () {
+            return ctx.slots.register({
+              name: 'conversation.session.header.corner',
+              id: 'dsh-anatomy:open',
+              order: 20,
+              registrant: 'dsh-anatomy',
+              inject: function () { return { t: t, sidebarRight: sidebarRight } },
+            }, OpenButton)
+          })
+        }, 'dsh-anatomy: header open button')
+      }
     }
 
 
@@ -8024,6 +8639,14 @@ window.__ModuleLoader__.load({
         formatLastEventLabel: formatLastEventLabel,
         applySnapshotState: applySnapshotState,
         RUNNING_WINDOW_MS: RUNNING_WINDOW_MS,
+        rightMountedSessionId: rightMountedSessionId,
+        hasOpenAnatomyTab: hasOpenAnatomyTab,
+        ensureAnatomyTab: ensureAnatomyTab,
+        CompactPanelView: CompactPanelView,
+        RightPanel: RightPanel,
+        OpenButton: OpenButton,
+        ANATOMY_TAB_ID: ANATOMY_TAB_ID,
+        ANATOMY_TAB_KIND: ANATOMY_TAB_KIND,
         localizedKind: localizedKind,
         localizedPhase: localizedPhase,
         localizedPluginKind: localizedPluginKind,
@@ -8049,6 +8672,11 @@ window.__ModuleLoader__.load({
         gutterRoute: gutterRoute,
         gutterBetween: gutterBetween,
         pickTopTools: pickTopTools,
+        simpleEdgeRoute: simpleEdgeRoute,
+        filterEventsBySession: filterEventsBySession,
+        deriveSessions: deriveSessions,
+        deriveSessionMetrics: deriveSessionMetrics,
+        formatPaintTimings: formatPaintTimings,
         chooseEdgeRoute: chooseEdgeRoute,
         cubicRouteForSides: cubicRouteForSides,
         routeFromControls: routeFromControls,
